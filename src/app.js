@@ -38,6 +38,7 @@ import {
 
 const PUBLIC_VERSION = "v2.2";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
+const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
 const state = {
   tab: "dashboard",
@@ -80,9 +81,11 @@ const state = {
 };
 
 const app = document.querySelector("#app");
+window.kuberOpenDestination = (destination) => openDestination(destination);
 
 function activateDestinationFromEvent(event) {
-  const destinationButton = event.target.closest?.("[data-destination]");
+  const eventTarget = event.target?.nodeType === Node.ELEMENT_NODE ? event.target : event.target?.parentElement;
+  const destinationButton = eventTarget?.closest?.("[data-destination]");
   if (!destinationButton || !app.contains(destinationButton)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -131,8 +134,7 @@ window.addEventListener("online", () => {
 });
 
 window.addEventListener("hashchange", () => {
-  openDestinationFromHash(false);
-  render();
+  openDestinationFromHash();
 });
 
 window.addEventListener("offline", () => {
@@ -545,7 +547,7 @@ function moreTemplate() {
       </header>
       <section class="more-grid">
         ${items.map(([id, title, icon]) => `
-          <a class="more-card" href="#${id}" data-destination="${id}">
+          <a class="more-card" href="#${id}" data-destination="${id}" onclick="window.kuberOpenDestination('${id}'); return false;">
             <span class="more-icon ${icon}">${iconGlyph(icon)}</span>
             <strong>${title}</strong>
           </a>
@@ -1059,6 +1061,18 @@ function wishlistPanelTemplate() {
       </section>
     `).join("") : `<div class="list-card wishlist-list"><p class="list-empty">No wishlist items yet</p></div>`}
   `;
+}
+
+function groupedWishlist(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const category = item.category || "General";
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(item);
+  }
+  return [...groups.entries()]
+    .map(([category, groupItems]) => ({ category, items: groupItems }))
+    .sort((a, b) => a.category.localeCompare(b.category));
 }
 
 function wishRowTemplate(item) {
@@ -1960,7 +1974,7 @@ function openDestination(destination) {
 
 function openDestinationFromHash(shouldRender = true) {
   const destination = location.hash.replace("#", "");
-  if (!destinationConfig(destination, true)) return;
+  if (!DESTINATION_IDS.has(destination)) return;
   state.tab = "more";
   state.destination = destination;
   if (shouldRender) render();
