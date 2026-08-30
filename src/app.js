@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.1";
+const PUBLIC_VERSION = "v2.2";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 
 const state = {
@@ -93,10 +93,25 @@ app.addEventListener("pointerup", activateDestinationFromEvent, { capture: true 
 app.addEventListener("touchend", activateDestinationFromEvent, { capture: true, passive: false });
 app.addEventListener("click", activateDestinationFromEvent, { capture: true });
 
+document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
+document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
+document.addEventListener("gestureend", preventZoomGesture, { passive: false });
+document.addEventListener("dblclick", preventZoomGesture, { passive: false });
+
+let lastTouchEndAt = 0;
+document.addEventListener("touchend", (event) => {
+  const now = Date.now();
+  if (now - lastTouchEndAt < 350) {
+    event.preventDefault();
+  }
+  lastTouchEndAt = now;
+}, { passive: false });
+
 window.addEventListener("DOMContentLoaded", async () => {
   await registerServiceWorker();
   history.replaceState({ kuber: true }, "", location.href);
   await refreshState();
+  openDestinationFromHash(false);
   render();
 });
 
@@ -112,6 +127,11 @@ window.addEventListener("popstate", () => {
 
 window.addEventListener("online", () => {
   state.runtimeHealth = runtimeHealthSnapshot();
+  render();
+});
+
+window.addEventListener("hashchange", () => {
+  openDestinationFromHash(false);
   render();
 });
 
@@ -525,10 +545,10 @@ function moreTemplate() {
       </header>
       <section class="more-grid">
         ${items.map(([id, title, icon]) => `
-          <button class="more-card" type="button" data-destination="${id}">
+          <a class="more-card" href="#${id}" data-destination="${id}">
             <span class="more-icon ${icon}">${iconGlyph(icon)}</span>
             <strong>${title}</strong>
-          </button>
+          </a>
         `).join("")}
       </section>
     </div>
@@ -712,7 +732,7 @@ function destinationPanelTemplate(destination) {
   `;
 }
 
-function destinationConfig(destination) {
+function destinationConfig(destination, existsOnly = false) {
   const data = state.data || emptyData();
   const counts = state.counts || {};
   const configs = {
@@ -752,6 +772,7 @@ function destinationConfig(destination) {
     }
   };
 
+  if (existsOnly) return configs[destination] || null;
   return configs[destination] || configs.backup;
 }
 
@@ -1931,9 +1952,22 @@ function tabButton(tab, icon, label) {
 function openDestination(destination) {
   if (!destination) return;
   if (state.destination === destination) return;
+  state.tab = "more";
   state.destination = destination;
-  history.pushState({ kuber: true }, "", location.href);
+  history.pushState({ kuber: true }, "", `#${destination}`);
   render();
+}
+
+function openDestinationFromHash(shouldRender = true) {
+  const destination = location.hash.replace("#", "");
+  if (!destinationConfig(destination, true)) return;
+  state.tab = "more";
+  state.destination = destination;
+  if (shouldRender) render();
+}
+
+function preventZoomGesture(event) {
+  event.preventDefault();
 }
 
 function bindEvents() {

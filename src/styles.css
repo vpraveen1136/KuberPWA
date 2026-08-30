@@ -961,6 +961,7 @@ button:disabled {
   padding: 14px 10px;
   border: 0;
   color: var(--text);
+  text-decoration: none;
   text-align: center;
   display: grid;
   justify-items: center;
