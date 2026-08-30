@@ -2,6 +2,7 @@ import { backupHealth, downloadFullBackup, importFullBackupFile } from "./backup
 import { buildBackfillTemplateCSV, downloadTextFile, parseTransactionCSV } from "./csv.js";
 import { addRecord, clearAllData, deleteRecord, getAllData, getCounts, saveAllData, updateRecord } from "./db.js";
 import {
+  addMonths,
   budgetAlerts,
   budgetsForMonth,
   budgetProgress,
@@ -22,6 +23,7 @@ import {
   INR,
   lastInstallmentDate,
   monthInputValue,
+  monthStart,
   netAmount,
   payableOnMonth,
   payableTrend,
@@ -30,10 +32,11 @@ import {
   sixMonthAverageSpend,
   spentThisMonth,
   spendingTrend,
+  sameMonth,
   statementStatus
 } from "./finance.js";
 
-const APP_VERSION = "Phase 14 / v17";
+const APP_VERSION = "UX parity / v18";
 
 const state = {
   tab: "dashboard",
@@ -44,11 +47,26 @@ const state = {
   transactionSearch: "",
   transactionCardID: "",
   transactionCategory: "All",
+  transactionFilterByMonth: false,
+  transactionMonth: monthInputValue(new Date()),
+  transactionFilterByRange: false,
+  transactionDateFrom: dateInputValue(addDays(new Date(), -30)),
+  transactionDateTo: dateInputValue(new Date()),
   statementCardID: "",
   budgetMonth: monthInputValue(new Date()),
   budgetCardID: "",
   analysisFYStartYear: financialYearStartYear(new Date()),
   analysisCategory: "",
+  allocationHorizon: "3M",
+  hiddenSpendingSeries: new Set(),
+  hiddenPayableSeries: new Set(),
+  settingsExpanded: {
+    reminders: false,
+    cards: false,
+    categories: false,
+    import: false
+  },
+  addPurchaseDraft: {},
   modalPayload: null,
   pdfURL: "",
   pdfTitle: "",
@@ -64,8 +82,19 @@ const app = document.querySelector("#app");
 
 window.addEventListener("DOMContentLoaded", async () => {
   await registerServiceWorker();
+  history.replaceState({ kuber: true }, "", location.href);
   await refreshState();
   render();
+});
+
+window.addEventListener("popstate", () => {
+  if (state.modal || state.destination) {
+    state.modal = null;
+    state.modalPayload = null;
+    state.destination = null;
+    history.pushState({ kuber: true }, "", location.href);
+    render();
+  }
 });
 
 window.addEventListener("online", () => {
@@ -100,6 +129,10 @@ function render() {
         ${tabButton("more", "grid", "More")}
       </nav>
       ${state.modal === "addPurchase" ? addPurchaseSheetTemplate() : ""}
+      ${state.modal === "monthPicker" ? monthPickerSheetTemplate() : ""}
+      ${state.modal === "cardPicker" ? cardPickerSheetTemplate() : ""}
+      ${state.modal === "dashboardDetail" ? dashboardDetailSheetTemplate(state.modalPayload) : ""}
+      ${state.modal === "confirm" ? confirmSheetTemplate(state.modalPayload) : ""}
       ${state.modal === "editTransaction" ? transactionEditorSheetTemplate(state.modalPayload) : ""}
       ${state.modal === "refundTransaction" ? refundSheetTemplate(state.modalPayload) : ""}
       ${state.modal === "convertEMI" ? convertEMISheetTemplate(state.modalPayload) : ""}
@@ -131,29 +164,31 @@ function dashboardTemplate() {
   const spent = spentThisMonth(data.transactions, selectedMonth, selectedCardID);
   const emiDue = emiDueOnMonth(data.emis, selectedMonth, selectedCardID);
   const payable = payableOnMonth(data.statements, data.payments, selectedMonth, selectedCardID);
-  const dueSoonItems = dueSoon(data.statements, data.payments, 10, selectedCardID);
+  const dueSoonItems = dueSoon(data.statements, data.payments, 7, selectedCardID);
   const recommendation = paymentRecommendation(data.statements, data.payments, selectedCardID);
   const cashOut = cashOutCurrentMonth(data.statements, data.payments, selectedMonth, selectedCardID);
   const alerts = budgetAlerts(data.transactions, data.budgets, selectedMonth, selectedCardID);
-  const cardPoints = selectedCardID ? [] : cardBreakdown(data.transactions, data.cards, selectedMonth);
+  const cardPoints = cardBreakdown(data.transactions, data.cards, selectedMonth);
   const categoryPoints = categoryBreakdown(data.transactions, selectedMonth, selectedCardID);
-  const spendTrend = spendingTrend(data.transactions, selectedMonth, 6, selectedCardID);
-  const dueTrend = payableTrend(data.statements, data.payments, selectedMonth, 6, selectedCardID);
+  const spendTrendSeries = cardMonthSeries(data.cards, data.transactions, selectedMonth, 6, selectedCardID, "spent");
+  const payableTrendSeries = cardMonthSeries(data.cards, data.statements, selectedMonth, 8, selectedCardID, "payable", data.payments);
+  const cardName = selectedCardID ? displayCard(data.cards.find((card) => card.id === selectedCardID)) : "All Cards";
 
   return `
     <div class="scroll-view">
-      <header class="dashboard-header">
+      <header class="dashboard-header dashboard-month-card" data-month-swipe>
         <div>
           <p class="eyebrow">Kuber</p>
           <h1>Dashboard</h1>
         </div>
-        <label class="month-control">
-          <span>Month</span>
-          <input type="month" data-control="selected-month" value="${escapeAttr(state.selectedMonth)}">
-        </label>
+        <div class="ios-month-control" aria-label="Selected month">
+          <button type="button" data-action="month-prev" aria-label="Previous month">‹</button>
+          <button type="button" class="month-title-button" data-action="open-month-picker">${monthTitle(selectedMonth)} <span>⌄</span></button>
+          <button type="button" data-action="month-next" aria-label="Next month">›</button>
+        </div>
       </header>
 
-      ${data.cards.length ? cardFilterTemplate(data.cards) : ""}
+      ${data.cards.length ? dashboardCardSelectorTemplate(cardName) : ""}
 
       <article class="card backup-card ${health.status}">
         <div class="card-leading-icon">${healthIcon(health.status)}</div>
@@ -165,14 +200,15 @@ function dashboardTemplate() {
 
       ${counts.cards ? `
         ${summaryGrid(spent, emiDue, payable, dueSoonItems[0])}
+        ${dueSoonCardTemplate(dueSoonItems)}
         ${recommendationCardTemplate(recommendation)}
         ${cashOutCardTemplate(cashOut)}
-        ${dueSoonCardTemplate(dueSoonItems)}
+        ${cardPaymentAllocationTemplate(data, selectedMonth, selectedCardID)}
         ${budgetAlertsTemplate(alerts)}
-        ${miniChartTemplate("Spending Trend", spendTrend)}
-        ${miniChartTemplate("Payable Trend", dueTrend)}
-        ${cardPoints.length ? miniChartTemplate("Card Spend", cardPoints) : ""}
-        ${miniChartTemplate("Category Spend", categoryPoints)}
+        ${seriesChartTemplate("Spending Trend", spendTrendSeries, state.hiddenSpendingSeries, "spending")}
+        ${seriesChartTemplate("Future Payable Trend", payableTrendSeries, state.hiddenPayableSeries, "payable")}
+        ${donutChartTemplate("Spending by Card", cardPoints, "card")}
+        ${donutChartTemplate("Spending by Category", categoryPoints, "category")}
       ` : importPromptTemplate()}
 
       <section class="card">
@@ -213,29 +249,39 @@ function cardFilterTemplate(cards) {
   `;
 }
 
+function dashboardCardSelectorTemplate(cardName) {
+  return `
+    <button class="dashboard-card-selector" type="button" data-action="open-card-picker">
+      <span>${iconGlyph("card")}</span>
+      <strong>${escapeHTML(cardName)}</strong>
+      <em>⌄</em>
+    </button>
+  `;
+}
+
 function summaryGrid(spent, emiDue, payable, nextDue) {
   return `
     <section class="summary-grid">
-      <article class="metric-card">
+      <button class="metric-card metric-button" type="button" data-dashboard-detail="spent">
         <span>Spent</span>
         <strong>${INR.format(spent)}</strong>
         <small>Selected month</small>
-      </article>
-      <article class="metric-card">
+      </button>
+      <button class="metric-card metric-button" type="button" data-dashboard-detail="emiDue">
         <span>EMI Due</span>
         <strong>${INR.format(emiDue)}</strong>
         <small>Installments</small>
-      </article>
-      <article class="metric-card">
+      </button>
+      <button class="metric-card metric-button" type="button" data-dashboard-detail="payable">
         <span>Payable</span>
         <strong>${INR.format(payable)}</strong>
         <small>Due in month</small>
-      </article>
-      <article class="metric-card">
+      </button>
+      <button class="metric-card metric-button" type="button" data-dashboard-detail="nextDue">
         <span>Next Due</span>
         <strong>${nextDue ? INR.format(nextDue.outstanding) : INR.format(0)}</strong>
         <small>${nextDue ? `${nextDue.cardType} · ${formatDate(nextDue.dueDate)}` : "No unpaid due found"}</small>
-      </article>
+      </button>
     </section>
   `;
 }
@@ -296,7 +342,97 @@ function dueSoonCardTemplate(items) {
             </div>
           `).join("")}
         </div>
-      ` : `<p>No statement due in the next 10 days.</p>`}
+      ` : `<p>No statement due in next 7 days.</p>`}
+    </section>
+  `;
+}
+
+function cardPaymentAllocationTemplate(data, selectedMonth, selectedCardID) {
+  const rows = cardPaymentAllocations(data, selectedMonth, state.allocationHorizon, selectedCardID);
+  return `
+    <section class="card">
+      <div class="section-title split-title">
+        <h2>Card Payment Allocation</h2>
+        <div class="segmented-actions compact-segmented" role="group" aria-label="Allocation range">
+          ${["3M", "6M", "FY"].map((range) => `<button type="button" class="${state.allocationHorizon === range ? "active" : ""}" data-allocation-horizon="${range}">${range}</button>`).join("")}
+        </div>
+      </div>
+      ${rows.length ? rows.map((row) => `
+        <div class="progress-row">
+          <div class="progress-label">
+            <strong>${escapeHTML(row.cardType)}</strong>
+            <span>Paid ${INR.format(row.paid)} / Pending ${INR.format(row.pending)}</span>
+          </div>
+          <div class="progress-track"><i style="width:${row.totalDue > 0 ? Math.round((row.paid / row.totalDue) * 100) : 0}%"></i></div>
+        </div>
+      `).join("") : `<p>No statement data available.</p>`}
+    </section>
+  `;
+}
+
+function seriesChartTemplate(title, series, hiddenSet, kind) {
+  const visible = series.filter((point) => !hiddenSet.has(point.cardID));
+  const months = [...new Map(series.map((point) => [point.monthKey, point])).values()];
+  const labels = [...new Map(series.map((point) => [point.cardID, point.cardLabel])).entries()];
+  const max = Math.max(...visible.map((point) => point.amount), 1);
+  const total = visible.reduce((sum, point) => sum + point.amount, 0);
+  return `
+    <section class="card">
+      <div class="section-title">
+        <h2>${title}</h2>
+        <span>${visible.length ? INR.format(total) : "No data"}</span>
+      </div>
+      ${series.some((point) => point.amount > 0) ? `
+        <div class="stacked-chart" style="--month-count:${months.length}">
+          ${months.map((month) => {
+            const monthPoints = visible.filter((point) => point.monthKey === month.monthKey && point.amount > 0);
+            const monthTotal = monthPoints.reduce((sum, point) => sum + point.amount, 0);
+            return `
+              <div class="stacked-month">
+                <small>${monthTotal ? INR.format(monthTotal) : ""}</small>
+                <div class="stacked-bars">
+                  ${monthPoints.map((point) => `<i style="height:${Math.max(4, Math.round((point.amount / max) * 100))}%; background:${seriesColor(point.cardID)}"></i>`).join("")}
+                </div>
+                <span>${escapeHTML(month.label)}</span>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        <div class="legend-row">
+          ${labels.map(([cardID, label]) => `
+            <button type="button" class="${hiddenSet.has(cardID) ? "muted" : ""}" data-series-toggle="${kind}" data-id="${escapeAttr(cardID)}">
+              <i style="background:${seriesColor(cardID)}"></i>${escapeHTML(label)}
+            </button>
+          `).join("")}
+        </div>
+      ` : `<p>No data available for this view.</p>`}
+    </section>
+  `;
+}
+
+function donutChartTemplate(title, points, kind) {
+  const total = points.reduce((sum, point) => sum + point.amount, 0);
+  const stops = donutStops(points);
+  return `
+    <section class="card">
+      <div class="section-title">
+        <h2>${title}</h2>
+        <span>${total ? INR.format(total) : "No data"}</span>
+      </div>
+      ${points.length ? `
+        <div class="donut-wrap">
+          <div class="donut-chart" style="background:${stops}"><span>${INR.format(total)}</span></div>
+        </div>
+        <div class="donut-list">
+          ${points.map((point, index) => `
+            <button type="button" class="donut-row" ${kind === "category" ? `data-category-detail="${escapeAttr(point.label)}"` : ""}>
+              <i style="background:${seriesColor(point.label, index)}"></i>
+              <span>${escapeHTML(point.label)}</span>
+              <b>${INR.format(point.amount)}</b>
+            </button>
+          `).join("")}
+        </div>
+      ` : `<p>No transactions this month.</p>`}
     </section>
   `;
 }
@@ -390,7 +526,10 @@ function addPurchaseSheetTemplate() {
   const data = state.data || emptyData();
   const cards = data.cards || [];
   const categories = data.categories?.length ? data.categories : ["General"];
-  const today = new Date().toISOString().slice(0, 10);
+  const draft = state.addPurchaseDraft || {};
+  const today = draft.date || new Date().toISOString().slice(0, 10);
+  const selectedCategory = draft.category || categories[0] || "General";
+  const selectedCardID = draft.cardID || cards[0]?.id || "";
 
   return `
     <div class="sheet-backdrop" data-action="close-modal">
@@ -398,38 +537,42 @@ function addPurchaseSheetTemplate() {
         <header class="sheet-toolbar">
           <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
           <h2 id="add-purchase-title">Add Purchase</h2>
-          <button type="submit" form="add-purchase-form" class="toolbar-button confirm">Save</button>
+          <button type="submit" form="add-purchase-form" class="toolbar-button confirm" data-save-button disabled>Save</button>
         </header>
 
         <form id="add-purchase-form" class="form-list">
           ${cards.length ? `
             <label class="form-row">
               <span>Description</span>
-              <input name="title" type="text" autocomplete="off" required placeholder="Purchase">
+              <input name="title" type="text" autocomplete="off" required placeholder="Purchase" value="${escapeAttr(draft.title || "")}">
             </label>
             <label class="form-row">
               <span>Category</span>
               <select name="category">
-                ${categories.map((category) => `<option value="${escapeAttr(category)}">${escapeHTML(category)}</option>`).join("")}
+                ${categories.map((category) => `<option value="${escapeAttr(category)}" ${selectedCategory === category ? "selected" : ""}>${escapeHTML(category)}</option>`).join("")}
               </select>
             </label>
+            <div class="inline-add-row">
+              <input name="newCategory" type="text" autocomplete="off" placeholder="Add category">
+              <button type="button" data-action="add-inline-category">Add</button>
+            </div>
             <label class="form-row">
               <span>Amount</span>
-              <input name="amount" type="number" inputmode="decimal" min="0.01" step="0.01" required placeholder="0">
+              <input name="amount" type="number" inputmode="decimal" min="0.01" step="0.01" required placeholder="0" value="${escapeAttr(draft.amount || "")}">
             </label>
             <label class="form-row">
               <span>Purchase Date</span>
-              <input name="date" type="date" required value="${today}">
+              <input name="date" type="date" required value="${escapeAttr(today)}">
             </label>
             <label class="form-row">
               <span>Card</span>
               <select name="cardID">
-                ${cards.map((card) => `<option value="${escapeAttr(card.id)}">${escapeHTML(displayCard(card))}</option>`).join("")}
+                ${cards.map((card) => `<option value="${escapeAttr(card.id)}" ${selectedCardID === card.id ? "selected" : ""}>${escapeHTML(displayCard(card))}</option>`).join("")}
               </select>
             </label>
             <label class="form-row">
               <span>Notes</span>
-              <input name="notes" type="text" autocomplete="off" placeholder="Optional">
+              <input name="notes" type="text" autocomplete="off" placeholder="Optional" value="${escapeAttr(draft.notes || "")}">
             </label>
           ` : `
             <div class="form-empty">
@@ -440,6 +583,103 @@ function addPurchaseSheetTemplate() {
         </form>
       </section>
     </div>
+  `;
+}
+
+function monthPickerSheetTemplate() {
+  const selected = fromMonthInput(state.selectedMonth);
+  const year = selected.getFullYear();
+  const months = Array.from({ length: 12 }, (_, index) => new Date(year, index, 1));
+  return `
+    <div class="sheet-backdrop" data-action="close-modal">
+      <section class="bottom-sheet small-sheet" role="dialog" aria-modal="true" aria-labelledby="month-picker-title" data-sheet>
+        <header class="sheet-toolbar">
+          <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
+          <h2 id="month-picker-title">Pick Month</h2>
+          <span></span>
+        </header>
+        <div class="picker-grid">
+          <button type="button" data-month-choice="${monthInputValue(addMonths(selected, -12))}">‹ ${year - 1}</button>
+          <strong>${year}</strong>
+          <button type="button" data-month-choice="${monthInputValue(addMonths(selected, 12))}">${year + 1} ›</button>
+          ${months.map((month) => `
+            <button type="button" class="${sameMonth(month, selected) ? "active" : ""}" data-month-choice="${monthInputValue(month)}">${month.toLocaleDateString("en-IN", { month: "short" })}</button>
+          `).join("")}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function cardPickerSheetTemplate() {
+  const data = state.data || emptyData();
+  return `
+    <div class="sheet-backdrop" data-action="close-modal">
+      <section class="bottom-sheet small-sheet" role="dialog" aria-modal="true" aria-labelledby="card-picker-title" data-sheet>
+        <header class="sheet-toolbar">
+          <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
+          <h2 id="card-picker-title">Choose Card</h2>
+          <span></span>
+        </header>
+        <div class="choice-list">
+          <button type="button" class="${state.selectedCardID ? "" : "active"}" data-card-choice="">All Cards</button>
+          ${data.cards.map((card) => `
+            <button type="button" class="${state.selectedCardID === card.id ? "active" : ""}" data-card-choice="${escapeAttr(card.id)}">${escapeHTML(displayCard(card))}</button>
+          `).join("")}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function dashboardDetailSheetTemplate(payload) {
+  if (!payload) return "";
+  return `
+    <div class="sheet-backdrop" data-action="close-modal">
+      <section class="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="dashboard-detail-title" data-sheet>
+        <header class="sheet-toolbar">
+          <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
+          <h2 id="dashboard-detail-title">${escapeHTML(payload.title)}</h2>
+          <span></span>
+        </header>
+        <div class="sheet-list">
+          ${payload.items.length ? payload.items.map(dashboardDetailRowTemplate).join("") : `<p class="list-empty">No records found.</p>`}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function confirmSheetTemplate(payload) {
+  if (!payload) return "";
+  return `
+    <div class="sheet-backdrop" data-action="close-modal">
+      <section class="bottom-sheet confirm-sheet small-sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title" data-sheet>
+        <header class="sheet-toolbar">
+          <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
+          <h2 id="confirm-title">${escapeHTML(payload.title || "Confirm")}</h2>
+          <button type="button" class="toolbar-button confirm danger-confirm" data-action="confirm-modal">${escapeHTML(payload.confirmLabel || "Delete")}</button>
+        </header>
+        <div class="confirm-body">
+          <p>${escapeHTML(payload.message || "")}</p>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function dashboardDetailRowTemplate(item) {
+  return `
+    <article class="record-row">
+      <div class="record-main">
+        <div class="record-title-line">
+          <strong>${escapeHTML(item.title)}</strong>
+          <b>${INR.format(item.amount)}</b>
+        </div>
+        <span>${escapeHTML(item.subtitle || "")}</span>
+        ${item.meta ? `<span>${escapeHTML(item.meta)}</span>` : ""}
+      </div>
+    </article>
   `;
 }
 
@@ -528,7 +768,7 @@ function emiRowTemplate(plan, data) {
   const tx = data.transactions.find((item) => item.id === plan.transactionID);
   const selectedMonth = fromMonthInput(state.selectedMonth);
   return `
-    <article class="record-row">
+    <article class="record-row swipe-row" data-swipe-leading="emi:edit:${escapeAttr(plan.id)}" data-swipe-trailing="emi:revert:${escapeAttr(plan.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(tx?.title || "EMI Purchase")}</strong>
@@ -644,40 +884,32 @@ function settingsPanelTemplate() {
   const data = state.data || emptyData();
   const runtime = state.runtimeHealth || runtimeHealthSnapshot();
   return `
-    <section class="card">
-      <div class="section-title">
-        <h2>Cards</h2>
+    ${settingsSectionTemplate("reminders", "Notifications & Reminders", `
+      <p>Browser notifications are limited in Safari PWAs. Backup reminders remain visible through Backup & Restore health.</p>
+    `)}
+
+    ${settingsSectionTemplate("cards", "Cards", `
+      <div class="section-title inner-title">
+        <h2>Credit Cards</h2>
         <button class="inline-button" type="button" data-settings-action="add-card">Add</button>
       </div>
-      ${data.cards.length ? `
-        <div class="settings-list">
-          ${data.cards.map(cardSettingsRowTemplate).join("")}
-        </div>
-      ` : `<p>No cards added yet.</p>`}
-    </section>
+      ${data.cards.length ? `<div class="settings-list">${data.cards.map(cardSettingsRowTemplate).join("")}</div>` : `<p>No cards added yet.</p>`}
+    `)}
 
-    <section class="card">
-      <div class="section-title">
-        <h2>Categories</h2>
-        <button class="inline-button" type="button" data-settings-action="add-category">Add</button>
+    ${settingsSectionTemplate("categories", "Categories", `
+      <div class="inline-add-row">
+        <input data-control="settings-new-category" type="text" autocomplete="off" placeholder="Add new category">
+        <button type="button" data-settings-action="quick-add-category">Add</button>
       </div>
-      ${data.categories.length ? `
-        <div class="settings-list">
-          ${data.categories.map(categorySettingsRowTemplate).join("")}
-        </div>
-      ` : `<p>No categories available.</p>`}
-    </section>
+      ${data.categories.length ? `<div class="settings-list">${data.categories.map(categorySettingsRowTemplate).join("")}</div>` : `<p>No categories available.</p>`}
+    `)}
 
-    <section class="card action-card">
-      <div class="section-title">
-        <h2>Backfill Import</h2>
-        <span>CSV</span>
-      </div>
+    ${settingsSectionTemplate("import", "Backfill Import", `
       <p>Import past purchases from a CSV using Description, Category, Amount, Purchase Date, Card (Name), and Refund amount. Matching rows are skipped if imported again.</p>
       <button class="secondary-button" type="button" data-action="download-template">Download Template</button>
       <button class="primary-button" type="button" data-action="choose-backfill-csv">Import Backfill CSV</button>
       <input id="backfill-csv-file" type="file" accept=".csv,text/csv" hidden>
-    </section>
+    `)}
 
     <section class="card">
       <div class="section-title">
@@ -704,6 +936,19 @@ function settingsPanelTemplate() {
   `;
 }
 
+function settingsSectionTemplate(id, title, body) {
+  const expanded = Boolean(state.settingsExpanded[id]);
+  return `
+    <section class="card collapsible-section">
+      <button class="collapsible-header" type="button" data-settings-toggle="${escapeAttr(id)}">
+        <span>${escapeHTML(title)}</span>
+        <b>${expanded ? "⌃" : "⌄"}</b>
+      </button>
+      ${expanded ? `<div class="collapsible-body">${body}</div>` : ""}
+    </section>
+  `;
+}
+
 function spendingAnalysisTemplate() {
   const data = state.data || emptyData();
   const categories = data.categories?.length ? data.categories : ["General"];
@@ -712,7 +957,7 @@ function spendingAnalysisTemplate() {
   }
   const fyPoints = financialYearCategorySpend(data.transactions, Number(state.analysisFYStartYear));
   const avgPoints = sixMonthAverageSpend(data.transactions, new Date());
-  const trendPoints = categoryTrend(data.transactions, state.analysisCategory, fromMonthInput(state.selectedMonth), 12);
+  const trendPoints = categoryTrend(data.transactions, state.analysisCategory, new Date(), 6);
   const fyTotal = fyPoints.reduce((sum, point) => sum + point.amount, 0);
   const avgTotal = avgPoints.reduce((sum, point) => sum + point.amount, 0);
   const trendTotal = trendPoints.reduce((sum, point) => sum + point.amount, 0);
@@ -743,7 +988,7 @@ function spendingAnalysisTemplate() {
         <h2>${escapeHTML(state.analysisCategory)}</h2>
         <span>${INR.format(trendTotal)}</span>
       </div>
-      <p>Last 12 selected-month trend for this category.</p>
+      <p>Last 6-month trend for this category.</p>
     </section>
   `;
 }
@@ -757,6 +1002,7 @@ function wishlistPanelTemplate() {
   });
   const totalTarget = items.reduce((sum, item) => sum + Number(item.targetAmount || 0), 0);
   const totalSaved = items.reduce((sum, item) => sum + Number(item.savedAmount || 0), 0);
+  const groups = groupedWishlist(items);
   return `
     <section class="card">
       <div class="section-title">
@@ -770,9 +1016,14 @@ function wishlistPanelTemplate() {
         ${countPill("Remaining", INR.format(Math.max(0, totalTarget - totalSaved)))}
       </div>
     </section>
-    <div class="list-card wishlist-list">
-      ${items.length ? items.map(wishRowTemplate).join("") : `<p class="list-empty">No wishlist items yet</p>`}
-    </div>
+    ${groups.length ? groups.map((group) => `
+      <section class="wishlist-group">
+        <h2>${escapeHTML(group.category)}</h2>
+        <div class="list-card wishlist-list">
+          ${group.items.map(wishRowTemplate).join("")}
+        </div>
+      </section>
+    `).join("") : `<div class="list-card wishlist-list"><p class="list-empty">No wishlist items yet</p></div>`}
   `;
 }
 
@@ -781,7 +1032,7 @@ function wishRowTemplate(item) {
   const saved = Number(item.savedAmount || 0);
   const progress = target > 0 ? Math.min(100, Math.max(0, Math.round((saved / target) * 100))) : 0;
   return `
-    <article class="record-row wish-row ${priorityClass(item.priority)}">
+    <article class="record-row wish-row swipe-row ${priorityClass(item.priority)}" data-swipe-leading="wish:edit:${escapeAttr(item.id)}" data-swipe-trailing="wish:delete:${escapeAttr(item.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(item.title || "Wish")}</strong>
@@ -944,6 +1195,10 @@ function cardEditorSheetTemplate(card) {
             <span>Statement Day</span>
             <input name="statementDay" type="number" inputmode="numeric" min="1" max="31" required value="${escapeAttr(statementDay)}">
           </label>
+          <div class="form-row readonly-row">
+            <span>Due Day</span>
+            <strong>${autoDueDay(statementDay)}</strong>
+          </div>
           <label class="form-row">
             <span>Notes</span>
             <input name="notes" type="text" autocomplete="off" value="${escapeAttr(card?.notes || "")}">
@@ -981,7 +1236,7 @@ function categoryEditorSheetTemplate(category) {
 function budgetRowTemplate(row) {
   const pct = Math.min(100, Math.max(0, Math.round(Number(row.utilization || 0) * 100)));
   return `
-    <article class="record-row">
+    <article class="record-row swipe-row" data-long-press="budget:edit:${escapeAttr(row.id)}" data-swipe-leading="budget:edit:${escapeAttr(row.id)}" data-swipe-trailing="budget:delete:${escapeAttr(row.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(row.category || "Category")}</strong>
@@ -1021,6 +1276,30 @@ function transactionsPanelTemplate() {
           ${data.categories.map((category) => `<option value="${escapeAttr(category)}" ${state.transactionCategory === category ? "selected" : ""}>${escapeHTML(category)}</option>`).join("")}
         </select>
       </div>
+      <label class="toggle-row">
+        <span>Filter by month</span>
+        <input type="checkbox" data-control="transaction-filter-month" ${state.transactionFilterByMonth ? "checked" : ""}>
+      </label>
+      ${state.transactionFilterByMonth ? `
+        <div class="form-row compact">
+          <span>Month</span>
+          <input type="month" data-control="transaction-month" value="${escapeAttr(state.transactionMonth)}">
+        </div>
+      ` : ""}
+      <label class="toggle-row">
+        <span>Filter by date range</span>
+        <input type="checkbox" data-control="transaction-filter-range" ${state.transactionFilterByRange ? "checked" : ""}>
+      </label>
+      ${state.transactionFilterByRange ? `
+        <div class="form-row compact">
+          <span>From</span>
+          <input type="date" data-control="transaction-date-from" value="${escapeAttr(state.transactionDateFrom)}">
+        </div>
+        <div class="form-row compact">
+          <span>To</span>
+          <input type="date" data-control="transaction-date-to" value="${escapeAttr(state.transactionDateTo)}">
+        </div>
+      ` : ""}
     </section>
     <div class="list-card transaction-list">
       ${rows.length ? rows.map(transactionRowTemplate).join("") : `<p class="list-empty">No transactions found</p>`}
@@ -1030,7 +1309,7 @@ function transactionsPanelTemplate() {
 
 function transactionRowTemplate(tx) {
   return `
-    <article class="record-row">
+    <article class="record-row swipe-row" data-swipe-leading="transaction:edit:${escapeAttr(tx.id)}" data-swipe-trailing="transaction:delete:${escapeAttr(tx.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(tx.title || "Purchase")}</strong>
@@ -1080,7 +1359,7 @@ function statementRowTemplate(statement) {
   const progress = Number(statement.totalDue || 0) > 0 ? Math.min(100, Math.round((status.paid / Number(statement.totalDue || 0)) * 100)) : 0;
   const file = data.statementFiles.find((candidate) => candidate.id === (statement.storedFileName || statement.fileName));
   return `
-    <article class="record-row statement-row ${status.tone}">
+    <article class="record-row statement-row swipe-row ${status.tone}" data-swipe-leading="statement:edit:${escapeAttr(statement.id)}" data-swipe-trailing="statement:delete:${escapeAttr(statement.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(statement.cardType || "Statement")}</strong>
@@ -1306,6 +1585,10 @@ function editEMISheetTemplate(plan) {
             <span>First Date</span>
             <input name="firstInstallmentDate" type="date" required value="${escapeAttr(dateInputValue(plan.firstInstallmentDate))}">
           </label>
+          <div class="form-row readonly-row">
+            <span>Last Installment</span>
+            <strong data-emi-last-date>${formatDate(lastInstallmentDate(plan))}</strong>
+          </div>
         </form>
       </section>
     </div>
@@ -1372,7 +1655,7 @@ function statementPaymentsTemplate(statement) {
     <section class="panel-screen payment-screen" role="dialog" aria-modal="true" aria-labelledby="payments-title">
       <header class="panel-nav">
         <button type="button" class="back-button" data-action="close-payment-panel">‹ Statements</button>
-        <h2 id="payments-title">Statement Payments</h2>
+        <h2 id="payments-title">Payment History</h2>
         <span></span>
       </header>
       <div class="panel-content">
@@ -1447,7 +1730,7 @@ function statementCSVImportSheetTemplate() {
 
 function paymentRowTemplate(payment) {
   return `
-    <article class="record-row">
+    <article class="record-row swipe-row" data-swipe-leading="payment:edit:${escapeAttr(payment.id)}" data-swipe-trailing="payment:delete:${escapeAttr(payment.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${formatDate(payment.paidDate)}</strong>
@@ -1644,6 +1927,7 @@ function bindEvents() {
   app.querySelectorAll("[data-destination]").forEach((button) => {
     button.addEventListener("click", () => {
       state.destination = button.dataset.destination;
+      history.pushState({ kuber: true }, "", location.href);
       render();
     });
   });
@@ -1653,9 +1937,84 @@ function bindEvents() {
     render();
   });
 
+  app.querySelector("[data-action='month-prev']")?.addEventListener("click", () => {
+    shiftSelectedMonth(-1);
+  });
+
+  app.querySelector("[data-action='month-next']")?.addEventListener("click", () => {
+    shiftSelectedMonth(1);
+  });
+
+  app.querySelector("[data-action='open-month-picker']")?.addEventListener("click", () => {
+    state.modal = "monthPicker";
+    history.pushState({ kuber: true }, "", location.href);
+    render();
+  });
+
+  app.querySelector("[data-action='open-card-picker']")?.addEventListener("click", () => {
+    state.modal = "cardPicker";
+    history.pushState({ kuber: true }, "", location.href);
+    render();
+  });
+
+  attachSwipe(app.querySelector("[data-month-swipe]"), {
+    left: () => shiftSelectedMonth(1),
+    right: () => shiftSelectedMonth(-1)
+  });
+
   app.querySelectorAll("[data-card-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedCardID = button.dataset.cardFilter || "";
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-month-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedMonth = button.dataset.monthChoice;
+      state.modal = null;
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-card-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedCardID = button.dataset.cardChoice || "";
+      state.modal = null;
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-dashboard-detail]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.modal = "dashboardDetail";
+      state.modalPayload = dashboardDetailPayload(button.dataset.dashboardDetail);
+      history.pushState({ kuber: true }, "", location.href);
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-category-detail]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.modal = "dashboardDetail";
+      state.modalPayload = dashboardCategoryDetailPayload(button.dataset.categoryDetail);
+      history.pushState({ kuber: true }, "", location.href);
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-allocation-horizon]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.allocationHorizon = button.dataset.allocationHorizon;
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-series-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const set = button.dataset.seriesToggle === "payable" ? state.hiddenPayableSeries : state.hiddenSpendingSeries;
+      if (set.has(button.dataset.id)) set.delete(button.dataset.id);
+      else set.add(button.dataset.id);
       render();
     });
   });
@@ -1672,6 +2031,31 @@ function bindEvents() {
 
   app.querySelector("[data-control='transaction-category']")?.addEventListener("change", (event) => {
     state.transactionCategory = event.target.value || "All";
+    render();
+  });
+
+  app.querySelector("[data-control='transaction-filter-month']")?.addEventListener("change", (event) => {
+    state.transactionFilterByMonth = event.target.checked;
+    render();
+  });
+
+  app.querySelector("[data-control='transaction-month']")?.addEventListener("change", (event) => {
+    state.transactionMonth = event.target.value || monthInputValue(new Date());
+    render();
+  });
+
+  app.querySelector("[data-control='transaction-filter-range']")?.addEventListener("change", (event) => {
+    state.transactionFilterByRange = event.target.checked;
+    render();
+  });
+
+  app.querySelector("[data-control='transaction-date-from']")?.addEventListener("change", (event) => {
+    state.transactionDateFrom = event.target.value || dateInputValue(addDays(new Date(), -30));
+    render();
+  });
+
+  app.querySelector("[data-control='transaction-date-to']")?.addEventListener("change", (event) => {
+    state.transactionDateTo = event.target.value || dateInputValue(new Date());
     render();
   });
 
@@ -1744,6 +2128,17 @@ function bindEvents() {
     });
   });
 
+  app.querySelectorAll("[data-settings-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.settingsToggle;
+      state.settingsExpanded[key] = !state.settingsExpanded[key];
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-swipe-leading], [data-swipe-trailing]").forEach((row) => attachRowGestures(row));
+  app.querySelectorAll("[data-sheet]").forEach((sheet) => attachSheetDismiss(sheet));
+
   app.querySelectorAll("[data-action='close-destination']").forEach((button) => {
     button.addEventListener("click", () => {
       state.destination = null;
@@ -1782,13 +2177,18 @@ function bindEvents() {
     const counts = state.counts || {};
     const hasExistingData = Boolean(counts.cards || counts.transactions || counts.statements || counts.statementFiles);
     if (hasExistingData) {
-      const ok = confirm("Importing a full backup will replace the local PWA data currently stored in this browser. Continue?");
-      if (!ok) {
-        event.target.value = "";
-        state.importStatus = "Import cancelled.";
-        render();
-        return;
-      }
+      state.modal = "confirm";
+      state.modalPayload = {
+        title: "Import Full Backup?",
+        message: "Importing a full backup will replace the local PWA data currently stored in this browser.",
+        confirmLabel: "Import",
+        onConfirm: async () => {
+          const summary = await importFullBackupFile(file);
+          state.importStatus = `Imported ${summary.cards} cards, ${summary.transactions} transactions, ${summary.statements} statements, and ${summary.statementFiles} PDFs.`;
+        }
+      };
+      render();
+      return;
     }
     await runBusy(async () => {
       const summary = await importFullBackupFile(file);
@@ -1800,6 +2200,7 @@ function bindEvents() {
 
   app.querySelector("[data-action='reset-local-data']")?.addEventListener("click", () => {
     state.modal = "resetData";
+    history.pushState({ kuber: true }, "", location.href);
     render();
   });
 
@@ -1847,15 +2248,54 @@ function bindEvents() {
 
   app.querySelector("[data-action='add-purchase']")?.addEventListener("click", () => {
     state.modal = "addPurchase";
+    history.pushState({ kuber: true }, "", location.href);
     render();
   });
+
+  app.querySelector("[data-action='add-inline-category']")?.addEventListener("click", async () => {
+    const form = app.querySelector("#add-purchase-form");
+    const input = form?.querySelector("[name='newCategory']");
+    const clean = String(input?.value || "").trim();
+    if (!clean) return;
+    state.addPurchaseDraft = addPurchaseDraftFromForm(form);
+    await runBusy(async () => {
+      await addCategoryIfMissing(clean);
+      await refreshState();
+      state.importStatus = "Category added.";
+    });
+    state.addPurchaseDraft.category = clean;
+    state.modal = "addPurchase";
+    render();
+  });
+
+  app.querySelector("#add-purchase-form")?.addEventListener("input", (event) => {
+    state.addPurchaseDraft = addPurchaseDraftFromForm(event.currentTarget);
+    updateSaveButtonState("#add-purchase-form");
+  });
+  updateSaveButtonState("#add-purchase-form");
 
   app.querySelectorAll("[data-action='close-modal']").forEach((element) => {
     element.addEventListener("click", (event) => {
       if (event.target.closest("[data-sheet]") && !event.target.matches("[data-action='close-modal']")) return;
+      if (state.modal === "addPurchase") state.addPurchaseDraft = {};
       state.modal = null;
+      state.modalPayload = null;
       render();
     });
+  });
+
+  app.querySelector("[data-action='confirm-modal']")?.addEventListener("click", async () => {
+    const action = state.modalPayload?.onConfirm;
+    if (typeof action !== "function") return;
+    await runBusy(async () => {
+      await action();
+      await refreshState();
+      if (state.modal === "confirm") {
+        state.modal = null;
+        state.modalPayload = null;
+      }
+    });
+    render();
   });
 
   app.querySelector("#add-purchase-form")?.addEventListener("submit", async (event) => {
@@ -1871,6 +2311,7 @@ function bindEvents() {
         notes: form.get("notes")
       });
       state.modal = null;
+      state.addPurchaseDraft = {};
       state.importStatus = "Purchase saved. Export a backup when you are done updating data.";
       await refreshState();
     });
@@ -1929,6 +2370,10 @@ function bindEvents() {
       await refreshState();
     });
     render();
+  });
+
+  app.querySelector("#edit-emi-form")?.addEventListener("input", () => {
+    updateEMILastDatePreview();
   });
 
   app.querySelector("#budget-editor-form")?.addEventListener("submit", async (event) => {
@@ -2097,13 +2542,15 @@ async function handleWishAction(action, id) {
   }
 
   if (action === "delete") {
-    if (!confirm("Delete this wishlist item?")) return;
-    await runBusy(async () => {
-      await deleteRecord("wishlist", item.id);
-      state.importStatus = "Wishlist item deleted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Delete Wish?",
+      message: `Delete "${item.title || "this wishlist item"}"?`,
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        await deleteRecord("wishlist", item.id);
+        state.importStatus = "Wishlist item deleted. Export a backup when you are done updating data.";
+      }
     });
-    render();
   }
 }
 
@@ -2128,6 +2575,18 @@ async function handleSettingsAction(action, id) {
 
   if (action === "delete-card") {
     await deleteCard(id);
+    return;
+  }
+
+  if (action === "quick-add-category") {
+    const clean = String(app.querySelector("[data-control='settings-new-category']")?.value || "").trim();
+    if (!clean) return;
+    await runBusy(async () => {
+      await addCategoryIfMissing(clean);
+      state.importStatus = "Category added. Export a backup when you are done updating data.";
+      await refreshState();
+    });
+    render();
     return;
   }
 
@@ -2163,17 +2622,19 @@ async function handleEMIAction(action, id) {
   }
 
   if (action === "revert") {
-    if (!confirm("Revert this EMI plan?")) return;
-    await runBusy(async () => {
-      await deleteRecord("emis", plan.id);
-      await updateRecord("transactions", plan.transactionID, (current) => {
-        const { emiID, ...rest } = current;
-        return rest;
-      });
-      state.importStatus = "EMI reverted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Revert EMI?",
+      message: "This will remove EMI conversion and mark the original transaction as one-time purchase.",
+      confirmLabel: "Revert",
+      onConfirm: async () => {
+        await deleteRecord("emis", plan.id);
+        await updateRecord("transactions", plan.transactionID, (current) => {
+          const { emiID, ...rest } = current;
+          return rest;
+        });
+        state.importStatus = "EMI reverted. Export a backup when you are done updating data.";
+      }
     });
-    render();
   }
 }
 
@@ -2214,13 +2675,15 @@ async function handleBudgetAction(action, id) {
   }
 
   if (action === "delete") {
-    if (!confirm("Delete this budget?")) return;
-    await runBusy(async () => {
-      await deleteRecord("budgets", budget.id);
-      state.importStatus = "Budget deleted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Delete Budget?",
+      message: `Delete ${budget.category || "this"} budget?`,
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        await deleteRecord("budgets", budget.id);
+        state.importStatus = "Budget deleted. Export a backup when you are done updating data.";
+      }
     });
-    render();
   }
 }
 
@@ -2250,29 +2713,35 @@ async function handleTransactionAction(action, id) {
   }
 
   if (action === "revert") {
-    if (!confirm("Revert this EMI plan?")) return;
-    await runBusy(async () => {
-      if (tx.emiID) await deleteRecord("emis", tx.emiID);
-      await updateRecord("transactions", tx.id, (current) => {
-        const { emiID, ...rest } = current;
-        return rest;
-      });
-      state.importStatus = "EMI reverted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Revert EMI?",
+      message: `This will remove EMI conversion for "${tx.title || "this purchase"}" and treat it as one-time purchase.`,
+      confirmLabel: "Revert",
+      onConfirm: async () => {
+        if (tx.emiID) await deleteRecord("emis", tx.emiID);
+        await updateRecord("transactions", tx.id, (current) => {
+          const { emiID, ...rest } = current;
+          return rest;
+        });
+        state.importStatus = "EMI reverted. Export a backup when you are done updating data.";
+      }
     });
-    render();
     return;
   }
 
   if (action === "delete") {
-    if (!confirm("Delete this transaction?")) return;
-    await runBusy(async () => {
-      if (tx.emiID) await deleteRecord("emis", tx.emiID);
-      await deleteRecord("transactions", tx.id);
-      state.importStatus = "Transaction deleted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Delete Transaction?",
+      message: tx.emiID
+        ? `Delete "${tx.title || "this transaction"}"? Linked EMI will also be removed.`
+        : `Delete "${tx.title || "this transaction"}"?`,
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        if (tx.emiID) await deleteRecord("emis", tx.emiID);
+        await deleteRecord("transactions", tx.id);
+        state.importStatus = "Transaction deleted. Export a backup when you are done updating data.";
+      }
     });
-    render();
   }
 }
 
@@ -2305,13 +2774,15 @@ async function handleStatementAction(action, id) {
     return;
   }
   if (action === "delete") {
-    if (!confirm("Delete this statement? Related payments and its stored file will also be removed.")) return;
-    await runBusy(async () => {
-      await deleteStatement(statement.id);
-      state.importStatus = "Statement deleted. Export a backup when you are done updating data.";
-      await refreshState();
+    showConfirmation({
+      title: "Delete Statement?",
+      message: "Related payments and its stored statement file will also be removed.",
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        await deleteStatement(statement.id);
+        state.importStatus = "Statement deleted. Export a backup when you are done updating data.";
+      }
     });
-    render();
     return;
   }
   const file = data.statementFiles.find((candidate) => candidate.id === (statement.storedFileName || statement.fileName));
@@ -2345,16 +2816,19 @@ async function handlePaymentAction(action, id) {
   }
 
   if (action === "delete") {
-    if (!confirm("Delete this payment?")) return;
-    await runBusy(async () => {
-      const statementID = payment.statementID;
-      await deleteRecord("payments", payment.id);
-      await refreshState();
-      state.modal = "statementPayments";
-      state.modalPayload = state.data.statements.find((statement) => statement.id === statementID) || null;
-      state.importStatus = "Payment deleted. Export a backup when you are done updating data.";
+    showConfirmation({
+      title: "Delete Payment?",
+      message: `Delete payment of ${INR.format(Number(payment.amount || 0))}?`,
+      confirmLabel: "Delete",
+      onConfirm: async () => {
+        const statementID = payment.statementID;
+        await deleteRecord("payments", payment.id);
+        await refreshState();
+        state.modal = "statementPayments";
+        state.modalPayload = state.data.statements.find((statement) => statement.id === statementID) || null;
+        state.importStatus = "Payment deleted. Export a backup when you are done updating data.";
+      }
     });
-    render();
   }
 }
 
@@ -2647,14 +3121,20 @@ async function deleteCard(id) {
     render();
     return;
   }
-  if (!confirm("Delete this card?")) return;
-  data.cards = data.cards.filter((card) => card.id !== id);
-  await saveAllData(data);
-  state.importStatus = "Card deleted. Export a backup when you are done updating data.";
-  state.modal = null;
-  state.modalPayload = null;
-  await refreshState();
-  render();
+  const card = data.cards.find((item) => item.id === id);
+  showConfirmation({
+    title: "Delete Card?",
+    message: `Delete ${card ? displayCard(card) : "this card"}?`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      const fresh = await getAllData();
+      fresh.cards = fresh.cards.filter((item) => item.id !== id);
+      await saveAllData(fresh);
+      state.importStatus = "Card deleted. Export a backup when you are done updating data.";
+      state.modal = null;
+      state.modalPayload = null;
+    }
+  });
 }
 
 async function saveCategory(oldName, form) {
@@ -2678,19 +3158,34 @@ async function saveCategory(oldName, form) {
 
 async function deleteCategory(name) {
   if (!name || name.toLowerCase() === "general") return;
-  if (!confirm("Delete this category? Existing transactions move to General and matching budgets are removed.")) return;
+  showConfirmation({
+    title: "Delete Category?",
+    message: "Existing transactions move to General and matching budgets are removed.",
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      const data = await getAllData();
+      if (!data.categories.some((category) => category.toLowerCase() === "general")) {
+        data.categories.push("General");
+      }
+      data.categories = data.categories.filter((category) => category !== name);
+      data.transactions = data.transactions.map((tx) => tx.category === name ? { ...tx, category: "General" } : tx);
+      data.budgets = data.budgets.filter((budget) => budget.category !== name);
+      data.categories = normalizedCategories(data.categories);
+      await saveAllData(data);
+      state.importStatus = "Category deleted. Export a backup when you are done updating data.";
+    }
+  });
+}
+
+async function addCategoryIfMissing(name) {
+  const clean = String(name || "").trim();
+  if (!clean) throw new Error("Category name is required.");
   const data = await getAllData();
-  if (!data.categories.some((category) => category.toLowerCase() === "general")) {
-    data.categories.push("General");
+  const exists = data.categories.some((category) => category.toLowerCase() === clean.toLowerCase());
+  if (!exists) {
+    data.categories = normalizedCategories([...data.categories, clean]);
+    await saveAllData(data);
   }
-  data.categories = data.categories.filter((category) => category !== name);
-  data.transactions = data.transactions.map((tx) => tx.category === name ? { ...tx, category: "General" } : tx);
-  data.budgets = data.budgets.filter((budget) => budget.category !== name);
-  data.categories = normalizedCategories(data.categories);
-  await saveAllData(data);
-  state.importStatus = "Category deleted. Export a backup when you are done updating data.";
-  await refreshState();
-  render();
 }
 
 async function saveWish(id, form) {
@@ -2939,12 +3434,180 @@ function findOrCreateImportCard(data, rawName) {
   return { card, created: true };
 }
 
+function dashboardDetailPayload(kind) {
+  const data = state.data || emptyData();
+  const month = fromMonthInput(state.selectedMonth);
+  const cardID = state.selectedCardID || null;
+  const titles = {
+    spent: "Spent Transactions",
+    emiDue: "EMI Due Details",
+    payable: "Payable Details",
+    nextDue: "Upcoming Statement Dues"
+  };
+  return {
+    title: titles[kind] || "Details",
+    items: dashboardDetailItems(data, kind, month, cardID)
+  };
+}
+
+function dashboardCategoryDetailPayload(category) {
+  const data = state.data || emptyData();
+  const month = fromMonthInput(state.selectedMonth);
+  const cardID = state.selectedCardID || null;
+  const items = data.transactions
+    .filter((tx) => sameMonth(tx.date, month) && (!cardID || tx.cardID === cardID) && String(tx.category || "General").toLowerCase() === String(category || "General").toLowerCase())
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .map((tx) => ({
+      title: tx.title || "Purchase",
+      amount: netAmount(tx),
+      subtitle: `${tx.cardType || "Card"} · ${formatDate(tx.date)}`,
+      meta: tx.notes || tx.category || "General"
+    }));
+  return { title: `${category} Transactions`, items };
+}
+
+function dashboardDetailItems(data, kind, month, cardID) {
+  if (kind === "spent") {
+    return data.transactions
+      .filter((tx) => sameMonth(tx.date, month) && (!cardID || tx.cardID === cardID))
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .map((tx) => ({
+        title: tx.title || "Purchase",
+        amount: netAmount(tx),
+        subtitle: `${tx.cardType || "Card"} · ${formatDate(tx.date)}`,
+        meta: tx.category || "General"
+      }));
+  }
+  if (kind === "emiDue") {
+    return data.emis
+      .filter((plan) => (!cardID || plan.cardID === cardID) && emiDueForPlanOnMonth(plan, month) > 0)
+      .map((plan) => {
+        const tx = data.transactions.find((item) => item.id === plan.transactionID);
+        return {
+          title: tx?.title || "EMI Purchase",
+          amount: Number(plan.monthlyEMI || 0),
+          subtitle: `${plan.cardType || tx?.cardType || "Card"} · ${Number(plan.tenureMonths || 0)} months`,
+          meta: `Remaining ${remainingInstallments(plan, month)}`
+        };
+      });
+  }
+  if (kind === "payable") {
+    return data.statements
+      .filter((statement) => sameMonth(statement.dueDate, month) && (!cardID || statement.cardID === cardID))
+      .map((statement) => ({
+        title: statement.cardType || "Statement",
+        amount: statementStatus(statement, data.payments).outstanding,
+        subtitle: `Due ${formatDate(statement.dueDate)}`,
+        meta: `Paid ${INR.format(statementStatus(statement, data.payments).paid)}`
+      }));
+  }
+  if (kind === "nextDue") {
+    return dueSoon(data.statements, data.payments, 365, cardID).map((statement) => ({
+      title: statement.cardType || "Statement",
+      amount: statement.outstanding,
+      subtitle: `Due ${formatDate(statement.dueDate)}`,
+      meta: `Minimum ${INR.format(Number(statement.minimumDue || 0))}`
+    }));
+  }
+  return [];
+}
+
+function cardPaymentAllocations(data, selectedMonth, horizon, cardID) {
+  const { start, end } = allocationRange(selectedMonth, horizon);
+  return data.cards
+    .filter((card) => !cardID || card.id === cardID)
+    .map((card) => {
+      const statements = data.statements.filter((statement) => statement.cardID === card.id && new Date(statement.dueDate) >= start && new Date(statement.dueDate) < end);
+      const totalDue = statements.reduce((sum, statement) => sum + Number(statement.totalDue || 0), 0);
+      const statementIDs = new Set(statements.map((statement) => statement.id));
+      const paid = data.payments
+        .filter((payment) => statementIDs.has(payment.statementID))
+        .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+      return {
+        cardType: displayCard(card),
+        paid,
+        pending: Math.max(0, totalDue - paid),
+        totalDue
+      };
+    })
+    .filter((row) => row.totalDue > 0 || row.paid > 0)
+    .sort((a, b) => b.pending - a.pending);
+}
+
+function allocationRange(selectedMonth, horizon) {
+  const start = monthStart(selectedMonth);
+  if (horizon === "FY") {
+    const year = financialYearStartYear(start);
+    return { start: new Date(year, 3, 1), end: new Date(year + 1, 3, 1) };
+  }
+  const months = horizon === "6M" ? 6 : 3;
+  return { start, end: addMonths(start, months) };
+}
+
+function cardMonthSeries(cards, rows, anchor, months, cardID, kind, payments = []) {
+  const start = kind === "payable" ? addMonths(anchor, -1) : addMonths(anchor, -(months - 1));
+  const selectedCards = cards.filter((card) => !cardID || card.id === cardID);
+  return Array.from({ length: months }, (_, monthIndex) => {
+    const month = addMonths(start, monthIndex);
+    return selectedCards.map((card) => ({
+      monthKey: monthInputValue(month),
+      label: month.toLocaleDateString("en-IN", { month: "short" }),
+      cardID: card.id,
+      cardLabel: displayCard(card),
+      amount: kind === "payable"
+        ? payableOnMonth(rows, payments, month, card.id)
+        : spentThisMonth(rows, month, card.id)
+    }));
+  }).flat();
+}
+
+function donutStops(points) {
+  const total = points.reduce((sum, point) => sum + point.amount, 0);
+  if (!total) return "rgba(100, 116, 139, 0.14)";
+  let cursor = 0;
+  return `conic-gradient(${points.map((point, index) => {
+    const start = cursor;
+    cursor += (point.amount / total) * 100;
+    return `${seriesColor(point.label, index)} ${start}% ${cursor}%`;
+  }).join(", ")})`;
+}
+
+function seriesColor(key, index = 0) {
+  const palette = ["#0a66d8", "#16803c", "#c76712", "#c22b2b", "#7c3aed", "#0f766e", "#db2777", "#4f46e5"];
+  const hash = String(key || "").split("").reduce((sum, char) => sum + char.charCodeAt(0), index);
+  return palette[Math.abs(hash) % palette.length];
+}
+
+function shiftSelectedMonth(delta) {
+  const oldMonth = fromMonthInput(state.selectedMonth);
+  state.selectedMonth = monthInputValue(addMonths(oldMonth, delta));
+  render();
+}
+
+function monthTitle(date) {
+  return date.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+}
+
+function emiDueForPlanOnMonth(plan, selectedMonth) {
+  const first = monthStart(plan.firstInstallmentDate);
+  const target = monthStart(selectedMonth);
+  const monthsElapsed = (target.getFullYear() - first.getFullYear()) * 12 + target.getMonth() - first.getMonth();
+  return monthsElapsed >= 0 && monthsElapsed < Number(plan.tenureMonths || 0) ? Number(plan.monthlyEMI || 0) : 0;
+}
+
 function filteredTransactions(data) {
   const query = state.transactionSearch.trim().toLowerCase();
   return [...data.transactions]
     .filter((tx) => {
       if (state.transactionCardID && tx.cardID !== state.transactionCardID) return false;
       if (state.transactionCategory !== "All" && tx.category !== state.transactionCategory) return false;
+      if (state.transactionFilterByMonth && !sameMonth(tx.date, fromMonthInput(state.transactionMonth))) return false;
+      if (state.transactionFilterByRange) {
+        const date = new Date(tx.date);
+        const from = startOfDay(state.transactionDateFrom);
+        const to = addDays(startOfDay(state.transactionDateTo), 1);
+        if (date < from || date >= to) return false;
+      }
       if (!query) return true;
       return [tx.title, tx.cardType, tx.category].some((value) => String(value || "").toLowerCase().includes(query));
     })
@@ -3132,6 +3795,106 @@ function formatBytes(bytes) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function showConfirmation(payload) {
+  state.modal = "confirm";
+  state.modalPayload = payload;
+  history.pushState({ kuber: true }, "", location.href);
+  render();
+}
+
+function attachSwipe(element, handlers) {
+  if (!element) return;
+  let startX = 0;
+  let startY = 0;
+  element.addEventListener("touchstart", (event) => {
+    const touch = event.touches[0];
+    startX = touch.clientX;
+    startY = touch.clientY;
+  }, { passive: true });
+  element.addEventListener("touchend", (event) => {
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0) handlers.left?.();
+    else handlers.right?.();
+  }, { passive: true });
+}
+
+function attachRowGestures(row) {
+  let pressTimer = null;
+  attachSwipe(row, {
+    left: () => runEncodedAction(row.dataset.swipeTrailing),
+    right: () => runEncodedAction(row.dataset.swipeLeading)
+  });
+  if (row.dataset.longPress) {
+    row.addEventListener("touchstart", () => {
+      pressTimer = setTimeout(() => runEncodedAction(row.dataset.longPress), 520);
+    }, { passive: true });
+    row.addEventListener("touchmove", () => clearTimeout(pressTimer), { passive: true });
+    row.addEventListener("touchend", () => clearTimeout(pressTimer), { passive: true });
+    row.addEventListener("touchcancel", () => clearTimeout(pressTimer), { passive: true });
+  }
+}
+
+function attachSheetDismiss(sheet) {
+  let startY = 0;
+  sheet.addEventListener("touchstart", (event) => {
+    startY = event.touches[0].clientY;
+  }, { passive: true });
+  sheet.addEventListener("touchend", (event) => {
+    const dy = event.changedTouches[0].clientY - startY;
+    if (dy > 90) {
+      state.modal = null;
+      state.modalPayload = null;
+      render();
+    }
+  }, { passive: true });
+}
+
+function updateSaveButtonState(selector) {
+  const form = app.querySelector(selector);
+  const button = form ? app.querySelector(`[form="${form.id}"][data-save-button]`) : null;
+  if (!form || !button) return;
+  button.disabled = !form.checkValidity();
+}
+
+function addPurchaseDraftFromForm(form) {
+  if (!form) return {};
+  const data = new FormData(form);
+  return {
+    title: String(data.get("title") || ""),
+    category: String(data.get("category") || ""),
+    amount: String(data.get("amount") || ""),
+    date: String(data.get("date") || ""),
+    cardID: String(data.get("cardID") || ""),
+    notes: String(data.get("notes") || "")
+  };
+}
+
+async function runEncodedAction(encoded) {
+  if (!encoded) return;
+  const [scope, action, ...idParts] = encoded.split(":");
+  const id = idParts.join(":");
+  if (scope === "transaction") await handleTransactionAction(action, id);
+  if (scope === "budget") await handleBudgetAction(action, id);
+  if (scope === "emi") await handleEMIAction(action, id);
+  if (scope === "wish") await handleWishAction(action, id);
+  if (scope === "statement") await handleStatementAction(action, id);
+  if (scope === "payment") await handlePaymentAction(action, id);
+}
+
+function updateEMILastDatePreview() {
+  const form = app.querySelector("#edit-emi-form");
+  const output = form?.querySelector("[data-emi-last-date]");
+  if (!form || !output) return;
+  const data = new FormData(form);
+  const tenureMonths = Number.parseInt(data.get("tenureMonths"), 10);
+  const firstInstallmentDate = new Date(`${data.get("firstInstallmentDate")}T00:00:00`);
+  if (!Number.isFinite(tenureMonths) || Number.isNaN(firstInstallmentDate.getTime())) return;
+  output.textContent = formatDate(addMonths(firstInstallmentDate, Math.max(0, tenureMonths - 1)));
+}
+
 async function runBusy(work) {
   if (state.isBusy) return;
   state.isBusy = true;
@@ -3162,6 +3925,17 @@ function dateInputValue(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0, 10);
   return date.toISOString().slice(0, 10);
+}
+
+function startOfDay(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return new Date(0);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addDays(value, days) {
+  const date = new Date(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
 }
 
 function autoDueDay(statementDay) {

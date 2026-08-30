@@ -202,6 +202,25 @@ Local-first PWA version of the Kuber iOS app, currently scoped to Phase 1 and Ph
 - Updates online/offline status as the browser state changes.
 - Adds a Check For Update button for the service worker cache.
 
+## UX Parity Pass
+
+- Replaces the dashboard month input with an iPhone-style month header, arrows, swipe navigation, and month picker sheet.
+- Replaces dashboard card chips with a compact card selector sheet.
+- Makes dashboard summary tiles open detail sheets.
+- Uses Due In Next 7 Days on the dashboard.
+- Adds Card Payment Allocation with 3M, 6M, and FY segmented ranges.
+- Adds interactive card legends for Spending Trend and Future Payable Trend.
+- Changes Future Payable Trend to 8 months starting from the previous selected month.
+- Adds donut-style Spending by Card and Spending by Category sections.
+- Makes category spending rows open category transaction details.
+- Adds Transactions month and date-range filters.
+- Adds touch swipe gestures for edit/delete/revert row actions and long-press edit for budgets.
+- Groups Wishlist items by category.
+- Adds collapsible Settings sections.
+- Adds inline Add Category inside Add Purchase.
+- Replaces browser confirmation dialogs with an iPhone-style confirmation sheet.
+- Adds swipe-down sheet dismissal and basic browser-back handling for active panels/sheets.
+
 ## Local Preview
 
 Serve this folder over HTTP so the service worker and file import APIs behave like Safari:
