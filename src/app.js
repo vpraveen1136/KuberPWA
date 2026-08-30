@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.0";
+const PUBLIC_VERSION = "v2.1";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 
 const state = {
@@ -80,6 +80,18 @@ const state = {
 };
 
 const app = document.querySelector("#app");
+
+function activateDestinationFromEvent(event) {
+  const destinationButton = event.target.closest?.("[data-destination]");
+  if (!destinationButton || !app.contains(destinationButton)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openDestination(destinationButton.dataset.destination);
+}
+
+app.addEventListener("pointerup", activateDestinationFromEvent, { capture: true });
+app.addEventListener("touchend", activateDestinationFromEvent, { capture: true, passive: false });
+app.addEventListener("click", activateDestinationFromEvent, { capture: true });
 
 window.addEventListener("DOMContentLoaded", async () => {
   await registerServiceWorker();
@@ -1918,6 +1930,7 @@ function tabButton(tab, icon, label) {
 
 function openDestination(destination) {
   if (!destination) return;
+  if (state.destination === destination) return;
   state.destination = destination;
   history.pushState({ kuber: true }, "", location.href);
   render();
