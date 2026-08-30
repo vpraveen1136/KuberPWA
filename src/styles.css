@@ -1540,12 +1540,17 @@ button:disabled {
 
 .dashboard-header.dashboard-month-card {
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   justify-content: stretch;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  margin-bottom: 12px;
 }
 
 .dashboard-month-card > *,
@@ -1557,13 +1562,65 @@ button:disabled {
 .ios-month-control {
   width: 100%;
   box-sizing: border-box;
-  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  grid-template-columns: 36px minmax(0, 1fr) 36px;
+  gap: 6px;
+  margin-top: 0;
+}
+
+.ios-month-control button,
+.month-title-button {
+  min-height: 38px;
+  border-radius: 10px;
 }
 
 .month-title-button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 15px;
+}
+
+.dashboard-month-card h1 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.05;
+}
+
+.dashboard-month-card .eyebrow {
+  margin-bottom: 1px;
+}
+
+.title-version {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.more-card {
+  position: relative;
+  z-index: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+@media (max-width: 390px) {
+  .scroll-view {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .dashboard-header.dashboard-month-card {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .ios-month-control {
+    grid-template-columns: 34px minmax(0, 1fr) 34px;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

@@ -36,7 +36,8 @@ import {
   statementStatus
 } from "./finance.js";
 
-const APP_VERSION = "UX parity / v19";
+const PUBLIC_VERSION = "v2.0";
+const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 
 const state = {
   tab: "dashboard",
@@ -178,8 +179,8 @@ function dashboardTemplate() {
     <div class="scroll-view">
       <header class="dashboard-header dashboard-month-card" data-month-swipe>
         <div>
-          <p class="eyebrow">Kuber</p>
-          <h1>Dashboard</h1>
+          <p class="eyebrow">Dashboard</p>
+          <h1>Kuber <span class="title-version">${PUBLIC_VERSION}</span></h1>
         </div>
         <div class="ios-month-control" aria-label="Selected month">
           <button type="button" data-action="month-prev" aria-label="Previous month">‹</button>
@@ -1915,6 +1916,13 @@ function tabButton(tab, icon, label) {
   `;
 }
 
+function openDestination(destination) {
+  if (!destination) return;
+  state.destination = destination;
+  history.pushState({ kuber: true }, "", location.href);
+  render();
+}
+
 function bindEvents() {
   app.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1926,10 +1934,12 @@ function bindEvents() {
 
   app.querySelectorAll("[data-destination]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.destination = button.dataset.destination;
-      history.pushState({ kuber: true }, "", location.href);
-      render();
+      openDestination(button.dataset.destination);
     });
+    button.addEventListener("touchend", (event) => {
+      event.preventDefault();
+      openDestination(button.dataset.destination);
+    }, { passive: false });
   });
 
   app.querySelector("[data-control='selected-month']")?.addEventListener("change", (event) => {
