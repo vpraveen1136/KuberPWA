@@ -117,6 +117,36 @@ export function lastInstallmentDate(plan) {
   return addMonths(plan.firstInstallmentDate, Math.max(0, Number(plan.tenureMonths || 1) - 1));
 }
 
+export function purchaseDueDateForTransaction(transaction, cards) {
+  if (!transaction?.cardID) return null;
+  const card = cards.find((candidate) => candidate.id === transaction.cardID);
+  if (!card) return null;
+
+  const purchaseDate = new Date(transaction.date);
+  const purchaseMonth = monthStart(purchaseDate);
+  const purchaseDay = purchaseDate.getDate();
+  const statementDay = Math.max(1, Math.min(31, Number(card.statementDay || 1)));
+  const paymentDueDay = Math.max(1, Math.min(31, Number(card.paymentDueDay || 20)));
+  const statementMonth = addMonths(purchaseMonth, purchaseDay > statementDay ? 1 : 0);
+  const dueMonth = addMonths(statementMonth, paymentDueDay > statementDay ? 0 : 1);
+  const maxDay = new Date(dueMonth.getFullYear(), dueMonth.getMonth() + 1, 0).getDate();
+  return new Date(dueMonth.getFullYear(), dueMonth.getMonth(), Math.min(paymentDueDay, maxDay));
+}
+
+export function payablePurchasesOnMonth(transactions, cards, selectedMonth = new Date(), cardID = null) {
+  return filterByCard(transactions, cardID)
+    .filter((tx) => !tx.emiID)
+    .reduce((sum, tx) => {
+      const dueDate = purchaseDueDateForTransaction(tx, cards);
+      if (!dueDate || !sameMonth(dueDate, selectedMonth)) return sum;
+      return sum + netAmount(tx);
+    }, 0);
+}
+
+export function payableByCycleOnMonth(transactions, emis, cards, selectedMonth = new Date(), cardID = null) {
+  return payablePurchasesOnMonth(transactions, cards, selectedMonth, cardID) + emiDueOnMonth(emis, selectedMonth, cardID);
+}
+
 export function payableOnMonth(statements, payments, selectedMonth = new Date(), cardID = null) {
   return filterByCard(statements, cardID)
     .filter((statement) => sameMonth(statement.dueDate, selectedMonth))

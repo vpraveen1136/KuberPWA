@@ -25,9 +25,9 @@ import {
   monthInputValue,
   monthStart,
   netAmount,
-  payableOnMonth,
-  payableTrend,
+  payableByCycleOnMonth,
   paymentRecommendation,
+  purchaseDueDateForTransaction,
   remainingInstallments,
   sixMonthAverageSpend,
   spentThisMonth,
@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const APP_VERSION = "UX parity / v18";
+const APP_VERSION = "UX parity / v19";
 
 const state = {
   tab: "dashboard",
@@ -163,7 +163,7 @@ function dashboardTemplate() {
   const selectedCardID = state.selectedCardID || null;
   const spent = spentThisMonth(data.transactions, selectedMonth, selectedCardID);
   const emiDue = emiDueOnMonth(data.emis, selectedMonth, selectedCardID);
-  const payable = payableOnMonth(data.statements, data.payments, selectedMonth, selectedCardID);
+  const payable = payableByCycleOnMonth(data.transactions, data.emis, data.cards, selectedMonth, selectedCardID);
   const dueSoonItems = dueSoon(data.statements, data.payments, 7, selectedCardID);
   const recommendation = paymentRecommendation(data.statements, data.payments, selectedCardID);
   const cashOut = cashOutCurrentMonth(data.statements, data.payments, selectedMonth, selectedCardID);
@@ -171,7 +171,7 @@ function dashboardTemplate() {
   const cardPoints = cardBreakdown(data.transactions, data.cards, selectedMonth);
   const categoryPoints = categoryBreakdown(data.transactions, selectedMonth, selectedCardID);
   const spendTrendSeries = cardMonthSeries(data.cards, data.transactions, selectedMonth, 6, selectedCardID, "spent");
-  const payableTrendSeries = cardMonthSeries(data.cards, data.statements, selectedMonth, 8, selectedCardID, "payable", data.payments);
+  const payableTrendSeries = cardMonthSeries(data.cards, data.transactions, selectedMonth, 8, selectedCardID, "payable", data.payments, data.emis);
   const cardName = selectedCardID ? displayCard(data.cards.find((card) => card.id === selectedCardID)) : "All Cards";
 
   return `
@@ -3492,14 +3492,30 @@ function dashboardDetailItems(data, kind, month, cardID) {
       });
   }
   if (kind === "payable") {
-    return data.statements
-      .filter((statement) => sameMonth(statement.dueDate, month) && (!cardID || statement.cardID === cardID))
-      .map((statement) => ({
-        title: statement.cardType || "Statement",
-        amount: statementStatus(statement, data.payments).outstanding,
-        subtitle: `Due ${formatDate(statement.dueDate)}`,
-        meta: `Paid ${INR.format(statementStatus(statement, data.payments).paid)}`
+    const oneTime = data.transactions
+      .filter((tx) => !tx.emiID && (!cardID || tx.cardID === cardID))
+      .map((tx) => ({ tx, dueDate: purchaseDueDateForTransaction(tx, data.cards) }))
+      .filter(({ tx, dueDate }) => dueDate && sameMonth(dueDate, month) && netAmount(tx) > 0)
+      .map(({ tx, dueDate }) => ({
+        title: tx.title || "Purchase",
+        amount: netAmount(tx),
+        subtitle: `${tx.cardType || "Card"} · ${tx.category || "General"}`,
+        meta: `Due ${formatDate(dueDate)}`,
+        date: dueDate
       }));
+    const emiRows = data.emis
+      .filter((plan) => (!cardID || plan.cardID === cardID) && emiDueForPlanOnMonth(plan, month) > 0)
+      .map((plan) => {
+        const tx = data.transactions.find((item) => item.id === plan.transactionID);
+        return {
+          title: tx?.title || "EMI Purchase",
+          amount: Number(plan.monthlyEMI || 0),
+          subtitle: `${plan.cardType || tx?.cardType || "Card"} · ${tx?.category || "EMI"}`,
+          meta: `Installment due`,
+          date: month
+        };
+      });
+    return [...oneTime, ...emiRows].sort((a, b) => new Date(b.date) - new Date(a.date));
   }
   if (kind === "nextDue") {
     return dueSoon(data.statements, data.payments, 365, cardID).map((statement) => ({
@@ -3544,7 +3560,7 @@ function allocationRange(selectedMonth, horizon) {
   return { start, end: addMonths(start, months) };
 }
 
-function cardMonthSeries(cards, rows, anchor, months, cardID, kind, payments = []) {
+function cardMonthSeries(cards, rows, anchor, months, cardID, kind, payments = [], emis = []) {
   const start = kind === "payable" ? addMonths(anchor, -1) : addMonths(anchor, -(months - 1));
   const selectedCards = cards.filter((card) => !cardID || card.id === cardID);
   return Array.from({ length: months }, (_, monthIndex) => {
@@ -3555,7 +3571,7 @@ function cardMonthSeries(cards, rows, anchor, months, cardID, kind, payments = [
       cardID: card.id,
       cardLabel: displayCard(card),
       amount: kind === "payable"
-        ? payableOnMonth(rows, payments, month, card.id)
+        ? payableByCycleOnMonth(rows, emis, cards, month, card.id)
         : spentThisMonth(rows, month, card.id)
     }));
   }).flat();
