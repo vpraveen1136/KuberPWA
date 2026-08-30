@@ -1,0 +1,19 @@
+{
+  "name": "Kuber",
+  "short_name": "Kuber",
+  "description": "Local-first credit card tracker for purchases, statements, EMIs, budgets, and backups.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef7ff",
+  "theme_color": "#e9f4ff",
+  "icons": [
+    {
+      "src": "./assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

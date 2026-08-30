@@ -1,0 +1,18 @@
+# Keep private financial exports and statement files out of GitHub.
+*.json
+*.csv
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.heic
+*.zip
+
+# Local runtime clutter.
+.DS_Store
+Thumbs.db
+node_modules/
+dist/
+.env
+.env.*
+
