@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.7";
+const PUBLIC_VERSION = "v2.8";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -718,11 +718,61 @@ function dashboardDetailSheetTemplate(payload) {
           <span></span>
         </header>
         <div class="sheet-list">
+          ${payload.kind === "payable" ? payableDetailChartsTemplate(payload.items) : ""}
           ${payload.items.length ? payload.items.map(dashboardDetailRowTemplate).join("") : `<p class="list-empty">No records found.</p>`}
         </div>
       </section>
     </div>
   `;
+}
+
+function payableDetailChartsTemplate(items) {
+  const payableItems = items.filter((item) => item.kind === "Payable" || item.kind === "EMI Due");
+  const cardPoints = groupedAmountPoints(payableItems, (item) => item.cardLabel || "Unknown");
+  const categoryPoints = groupedAmountPoints(payableItems.filter((item) => item.category), (item) => item.category || "Other");
+  return `
+    <section class="detail-chart-section">
+      <h3>Payable by Card</h3>
+      ${cardPoints.length ? detailBarChartTemplate(cardPoints, "teal") : `<p class="list-empty">No card data available</p>`}
+    </section>
+    <section class="detail-chart-section">
+      <h3>Payable by Category</h3>
+      ${categoryPoints.length ? detailBarChartTemplate(categoryPoints, "blue") : `<p class="list-empty">No category data available</p>`}
+    </section>
+  `;
+}
+
+function groupedAmountPoints(items, labelForItem) {
+  const totals = new Map();
+  for (const item of items) {
+    const label = String(labelForItem(item) || "Other").trim() || "Other";
+    totals.set(label, (totals.get(label) || 0) + Number(item.amount || 0));
+  }
+  return [...totals.entries()]
+    .map(([label, amount]) => ({ label, amount }))
+    .filter((point) => point.amount > 0)
+    .sort((a, b) => b.amount - a.amount);
+}
+
+function detailBarChartTemplate(points, tone) {
+  const max = Math.max(...points.map((point) => point.amount), 1);
+  return `
+    <div class="detail-bar-chart ${tone}" style="--bar-count:${points.length}">
+      ${points.map((point) => `
+        <div class="detail-bar-column">
+          <small>${INR.format(point.amount)}</small>
+          <div class="detail-bar-track"><i style="height:${Math.max(5, Math.round((point.amount / max) * 100))}%"></i></div>
+          <span>${escapeHTML(shortChartLabel(point.label, tone === "teal" ? 12 : 10))}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function shortChartLabel(value, maxLength) {
+  const clean = String(value || "").trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, maxLength)}...`;
 }
 
 function confirmSheetTemplate(payload) {
@@ -3547,6 +3597,8 @@ function dashboardDetailPayload(kind) {
   };
   return {
     title: titles[kind] || "Details",
+    kind,
+    month,
     items: dashboardDetailItems(data, kind, month, cardID)
   };
 }
@@ -3603,7 +3655,10 @@ function dashboardDetailItems(data, kind, month, cardID) {
         subtitle: `${tx.cardType || "Card"} · ${tx.category || "General"}`,
         meta: spentDueMeta(tx.date, dueDate),
         date: dueDate,
-        spentDate: tx.date
+        spentDate: tx.date,
+        kind: "Payable",
+        category: tx.category || "General",
+        cardLabel: tx.cardType || "Card"
       }));
     const emiRows = data.emis
       .filter((plan) => (!cardID || plan.cardID === cardID) && emiDueForPlanOnMonth(plan, month) > 0)
@@ -3616,7 +3671,10 @@ function dashboardDetailItems(data, kind, month, cardID) {
           subtitle: `${plan.cardType || tx?.cardType || "Card"} · ${tx?.category || "EMI"}`,
           meta: spentDueMeta(tx?.date || plan.firstInstallmentDate, dueDate),
           date: dueDate,
-          spentDate: tx?.date || plan.firstInstallmentDate
+          spentDate: tx?.date || plan.firstInstallmentDate,
+          kind: "EMI Due",
+          category: tx?.category || "EMI",
+          cardLabel: plan.cardType || tx?.cardType || "Card"
         };
       });
     return [...oneTime, ...emiRows].sort(newestTransactionFirst);
