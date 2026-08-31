@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.4";
+const PUBLIC_VERSION = "v2.5";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -3571,19 +3571,20 @@ function dashboardDetailItems(data, kind, month, cardID) {
         title: tx.title || "Purchase",
         amount: netAmount(tx),
         subtitle: `${tx.cardType || "Card"} · ${tx.category || "General"}`,
-        meta: `Due ${formatDate(dueDate)}`,
+        meta: spentDueMeta(tx.date, dueDate),
         date: dueDate
       }));
     const emiRows = data.emis
       .filter((plan) => (!cardID || plan.cardID === cardID) && emiDueForPlanOnMonth(plan, month) > 0)
       .map((plan) => {
         const tx = data.transactions.find((item) => item.id === plan.transactionID);
+        const dueDate = installmentDueDate(plan, month, data.cards);
         return {
           title: tx?.title || "EMI Purchase",
           amount: Number(plan.monthlyEMI || 0),
           subtitle: `${plan.cardType || tx?.cardType || "Card"} · ${tx?.category || "EMI"}`,
-          meta: `Installment due`,
-          date: month
+          meta: spentDueMeta(tx?.date || plan.firstInstallmentDate, dueDate),
+          date: dueDate
         };
       });
     return [...oneTime, ...emiRows].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -3597,6 +3598,26 @@ function dashboardDetailItems(data, kind, month, cardID) {
     }));
   }
   return [];
+}
+
+function spentDueMeta(spentDate, dueDate) {
+  return `Spent ${dayMonth(spentDate)}, Due ${dayMonth(dueDate)}`;
+}
+
+function dayMonth(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--.--";
+  return `${String(date.getDate()).padStart(2, "0")}.${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function installmentDueDate(plan, month, cards) {
+  const card = cards.find((candidate) => candidate.id === plan.cardID);
+  const statementDay = Math.max(1, Math.min(31, Number(card?.statementDay || 1)));
+  const paymentDueDay = Math.max(1, Math.min(31, Number(card?.paymentDueDay || 20)));
+  const baseMonth = monthStart(month);
+  const dueMonth = addMonths(baseMonth, paymentDueDay > statementDay ? 0 : 1);
+  const maxDay = new Date(dueMonth.getFullYear(), dueMonth.getMonth() + 1, 0).getDate();
+  return new Date(dueMonth.getFullYear(), dueMonth.getMonth(), Math.min(paymentDueDay, maxDay));
 }
 
 function cardPaymentAllocations(data, selectedMonth, horizon, cardID) {
