@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.5";
+const PUBLIC_VERSION = "v2.6";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -3572,7 +3572,8 @@ function dashboardDetailItems(data, kind, month, cardID) {
         amount: netAmount(tx),
         subtitle: `${tx.cardType || "Card"} · ${tx.category || "General"}`,
         meta: spentDueMeta(tx.date, dueDate),
-        date: dueDate
+        date: dueDate,
+        spentDate: tx.date
       }));
     const emiRows = data.emis
       .filter((plan) => (!cardID || plan.cardID === cardID) && emiDueForPlanOnMonth(plan, month) > 0)
@@ -3584,10 +3585,11 @@ function dashboardDetailItems(data, kind, month, cardID) {
           amount: Number(plan.monthlyEMI || 0),
           subtitle: `${plan.cardType || tx?.cardType || "Card"} · ${tx?.category || "EMI"}`,
           meta: spentDueMeta(tx?.date || plan.firstInstallmentDate, dueDate),
-          date: dueDate
+          date: dueDate,
+          spentDate: tx?.date || plan.firstInstallmentDate
         };
       });
-    return [...oneTime, ...emiRows].sort((a, b) => new Date(b.date) - new Date(a.date));
+    return [...oneTime, ...emiRows].sort(newestTransactionFirst);
   }
   if (kind === "nextDue") {
     return dueSoon(data.statements, data.payments, 365, cardID).map((statement) => ({
@@ -3598,6 +3600,10 @@ function dashboardDetailItems(data, kind, month, cardID) {
     }));
   }
   return [];
+}
+
+function newestTransactionFirst(a, b) {
+  return new Date(b.spentDate || b.date) - new Date(a.spentDate || a.date);
 }
 
 function spentDueMeta(spentDate, dueDate) {
