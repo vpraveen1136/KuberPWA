@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.6";
+const PUBLIC_VERSION = "v2.7";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -81,20 +81,60 @@ const state = {
 };
 
 const app = document.querySelector("#app");
-window.kuberOpenDestination = (destination) => openDestination(destination);
+let destinationTouch = null;
+let suppressDestinationClickUntil = 0;
 
-function activateDestinationFromEvent(event) {
+function destinationElementFromEvent(event) {
   const eventTarget = event.target?.nodeType === Node.ELEMENT_NODE ? event.target : event.target?.parentElement;
   const destinationButton = eventTarget?.closest?.("[data-destination]");
-  if (!destinationButton || !app.contains(destinationButton)) return;
+  return destinationButton && app.contains(destinationButton) ? destinationButton : null;
+}
+
+function activateDestinationFromEvent(event) {
+  const destinationButton = destinationElementFromEvent(event);
+  if (!destinationButton) return;
+  if (Date.now() < suppressDestinationClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   event.preventDefault();
   event.stopPropagation();
   openDestination(destinationButton.dataset.destination);
 }
 
-app.addEventListener("pointerup", activateDestinationFromEvent, { capture: true });
-app.addEventListener("touchend", activateDestinationFromEvent, { capture: true, passive: false });
 app.addEventListener("click", activateDestinationFromEvent, { capture: true });
+
+app.addEventListener("touchstart", (event) => {
+  const destinationButton = destinationElementFromEvent(event);
+  if (!destinationButton) {
+    destinationTouch = null;
+    return;
+  }
+  const touch = event.touches[0];
+  destinationTouch = {
+    id: destinationButton.dataset.destination,
+    x: touch.clientX,
+    y: touch.clientY,
+    moved: false
+  };
+}, { capture: true, passive: true });
+
+app.addEventListener("touchmove", (event) => {
+  if (!destinationTouch) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - destinationTouch.x;
+  const dy = touch.clientY - destinationTouch.y;
+  if (Math.hypot(dx, dy) > 12) destinationTouch.moved = true;
+}, { capture: true, passive: true });
+
+app.addEventListener("touchend", (event) => {
+  if (!destinationTouch) return;
+  if (destinationTouch.moved) {
+    suppressDestinationClickUntil = Date.now() + 500;
+  }
+  destinationTouch = null;
+}, { capture: true, passive: true });
 
 document.addEventListener("gesturestart", preventZoomGesture, { passive: false });
 document.addEventListener("gesturechange", preventZoomGesture, { passive: false });
@@ -547,7 +587,7 @@ function moreTemplate() {
       </header>
       <section class="more-grid">
         ${items.map(([id, title, icon]) => `
-          <a class="more-card" href="#${id}" data-destination="${id}" onclick="window.kuberOpenDestination('${id}'); return false;">
+          <a class="more-card" href="#${id}" data-destination="${id}">
             <span class="more-icon ${icon}">${iconGlyph(icon)}</span>
             <strong>${title}</strong>
           </a>
@@ -1991,16 +2031,6 @@ function bindEvents() {
       state.destination = null;
       render();
     });
-  });
-
-  app.querySelectorAll("[data-destination]").forEach((button) => {
-    button.addEventListener("click", () => {
-      openDestination(button.dataset.destination);
-    });
-    button.addEventListener("touchend", (event) => {
-      event.preventDefault();
-      openDestination(button.dataset.destination);
-    }, { passive: false });
   });
 
   app.querySelector("[data-control='selected-month']")?.addEventListener("change", (event) => {
