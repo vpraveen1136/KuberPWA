@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.2";
+const PUBLIC_VERSION = "v2.4";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -3650,7 +3650,7 @@ function cardMonthSeries(cards, rows, anchor, months, cardID, kind, payments = [
 
 function donutStops(points) {
   const total = points.reduce((sum, point) => sum + point.amount, 0);
-  if (!total) return "rgba(100, 116, 139, 0.14)";
+  if (!total) return "rgba(142, 142, 147, 0.14)";
   let cursor = 0;
   return `conic-gradient(${points.map((point, index) => {
     const start = cursor;
@@ -3660,7 +3660,7 @@ function donutStops(points) {
 }
 
 function seriesColor(key, index = 0) {
-  const palette = ["#0a66d8", "#16803c", "#c76712", "#c22b2b", "#7c3aed", "#0f766e", "#db2777", "#4f46e5"];
+  const palette = ["#007aff", "#34c759", "#ff9500", "#ff2d55", "#af52de", "#5ac8fa", "#5856d6", "#ff3b30", "#00c7be", "#a2845e"];
   const hash = String(key || "").split("").reduce((sum, char) => sum + char.charCodeAt(0), index);
   return palette[Math.abs(hash) % palette.length];
 }
@@ -3926,12 +3926,24 @@ function attachRowGestures(row) {
 
 function attachSheetDismiss(sheet) {
   let startY = 0;
+  let startX = 0;
+  let startTime = 0;
+  let canDismiss = false;
   sheet.addEventListener("touchstart", (event) => {
-    startY = event.touches[0].clientY;
+    const touch = event.touches[0];
+    startY = touch.clientY;
+    startX = touch.clientX;
+    startTime = Date.now();
+    canDismiss = Boolean(event.target.closest(".sheet-toolbar"));
   }, { passive: true });
   sheet.addEventListener("touchend", (event) => {
-    const dy = event.changedTouches[0].clientY - startY;
-    if (dy > 90) {
+    if (!canDismiss) return;
+    const touch = event.changedTouches[0];
+    const dy = touch.clientY - startY;
+    const dx = touch.clientX - startX;
+    const elapsed = Math.max(1, Date.now() - startTime);
+    const velocity = dy / elapsed;
+    if (dy > 130 && Math.abs(dx) < 60 && velocity > 0.28) {
       state.modal = null;
       state.modalPayload = null;
       render();
