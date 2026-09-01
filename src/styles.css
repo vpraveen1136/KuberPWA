@@ -1207,6 +1207,18 @@ button:disabled {
   text-align: right;
 }
 
+.icon-toolbar-button {
+  justify-self: end;
+  width: 38px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--blue-soft);
+  font-size: 18px;
+  text-align: center;
+}
+
 .form-list {
   max-height: calc(100svh - 86px);
   overflow-y: auto;

@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.8";
+const PUBLIC_VERSION = "v2.9";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -72,6 +72,7 @@ const state = {
   modalPayload: null,
   pdfURL: "",
   pdfTitle: "",
+  pdfBackLabel: "Close",
   counts: null,
   data: null,
   storageHealth: null,
@@ -715,7 +716,9 @@ function dashboardDetailSheetTemplate(payload) {
         <header class="sheet-toolbar">
           <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
           <h2 id="dashboard-detail-title">${escapeHTML(payload.title)}</h2>
-          <span></span>
+          ${payload.kind === "spent" || payload.kind === "payable"
+            ? `<button type="button" class="toolbar-button confirm icon-toolbar-button" data-action="dashboard-detail-pdf" aria-label="Show PDF">${iconGlyph("doc")}</button>`
+            : "<span></span>"}
         </header>
         <div class="sheet-list">
           ${payload.kind === "payable" ? payableDetailChartsTemplate(payload.items) : ""}
@@ -1771,7 +1774,7 @@ function pdfViewerTemplate() {
   return `
     <section class="panel-screen pdf-screen" role="dialog" aria-modal="true" aria-labelledby="pdf-title">
       <header class="panel-nav">
-        <button type="button" class="back-button" data-action="close-pdf">‹ Statements</button>
+        <button type="button" class="back-button" data-action="close-pdf">‹ ${escapeHTML(state.pdfBackLabel || "Close")}</button>
         <h2 id="pdf-title">${escapeHTML(state.pdfTitle || "Statement")}</h2>
         <button type="button" class="toolbar-button confirm" data-action="download-active-pdf">Open</button>
       </header>
@@ -2143,6 +2146,10 @@ function bindEvents() {
       history.pushState({ kuber: true }, "", location.href);
       render();
     });
+  });
+
+  app.querySelector("[data-action='dashboard-detail-pdf']")?.addEventListener("click", () => {
+    showDashboardDetailPDF(state.modalPayload);
   });
 
   app.querySelectorAll("[data-category-detail]").forEach((button) => {
@@ -3898,10 +3905,130 @@ function downloadURL(url, fileName) {
   link.remove();
 }
 
+function showDashboardDetailPDF(payload) {
+  if (!payload || !["spent", "payable"].includes(payload.kind)) return;
+  if (state.pdfURL) URL.revokeObjectURL(state.pdfURL);
+  const title = payload.title || "Transactions";
+  const monthLabel = payload.month ? monthTitle(payload.month) : monthTitle(fromMonthInput(state.selectedMonth));
+  const bytes = buildTransactionListPDF(title, monthLabel, payload.items || []);
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  state.pdfURL = URL.createObjectURL(blob);
+  state.pdfTitle = `${title} PDF`;
+  state.pdfBackLabel = "Details";
+  state.modal = "pdfViewer";
+  state.modalPayload = null;
+  render();
+}
+
+function buildTransactionListPDF(title, monthLabel, items) {
+  const rows = [];
+  rows.push({ size: 18, text: title });
+  rows.push({ size: 11, text: monthLabel });
+  rows.push({ size: 11, text: `Total: ${INR.format(items.reduce((sum, item) => sum + Number(item.amount || 0), 0))}` });
+  rows.push({ size: 9, text: " " });
+  if (!items.length) {
+    rows.push({ size: 11, text: "No records found." });
+  }
+  for (const item of items) {
+    rows.push({ size: 11, text: `${item.title || "Purchase"}    ${INR.format(Number(item.amount || 0))}` });
+    rows.push({ size: 9, text: item.subtitle || "" });
+    if (item.meta) rows.push({ size: 9, text: item.meta });
+    rows.push({ size: 7, text: " " });
+  }
+  return makeSimplePDF(rows);
+}
+
+function makeSimplePDF(rows) {
+  const pageWidth = 595;
+  const pageHeight = 842;
+  const marginX = 46;
+  const topY = 794;
+  const bottomY = 48;
+  const pages = [];
+  let page = [];
+  let y = topY;
+  for (const row of rows) {
+    const lineHeight = row.size + 6;
+    if (y - lineHeight < bottomY && page.length) {
+      pages.push(page);
+      page = [];
+      y = topY;
+    }
+    page.push({ ...row, y });
+    y -= lineHeight;
+  }
+  if (page.length) pages.push(page);
+
+  const objects = [];
+  const addObject = (content) => {
+    objects.push(content);
+    return objects.length;
+  };
+  const fontRef = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const pageRefs = [];
+  for (const pageRows of pages) {
+    const stream = pageRows.map((row) => {
+      const lines = wrapPDFText(String(row.text || ""), row.size === 18 ? 58 : 82);
+      return lines.map((line, index) => {
+        const lineY = row.y - index * (row.size + 3);
+        return `BT /F1 ${row.size} Tf ${marginX} ${lineY} Td (${escapePDFText(line)}) Tj ET`;
+      }).join("\n");
+    }).join("\n");
+    const streamRef = addObject(`<< /Length ${byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+    pageRefs.push(addObject(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRef} 0 R >> >> /Contents ${streamRef} 0 R >>`));
+  }
+  const pagesRef = addObject(`<< /Type /Pages /Kids [${pageRefs.map((ref) => `${ref} 0 R`).join(" ")}] /Count ${pageRefs.length} >>`);
+  for (const ref of pageRefs) {
+    objects[ref - 1] = objects[ref - 1].replace("/Parent 0 0 R", `/Parent ${pagesRef} 0 R`);
+  }
+  const catalogRef = addObject(`<< /Type /Catalog /Pages ${pagesRef} 0 R >>`);
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((content, index) => {
+    offsets.push(byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${content}\nendobj\n`;
+  });
+  const xrefOffset = byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogRef} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return new TextEncoder().encode(pdf);
+}
+
+function wrapPDFText(text, maxLength) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return [""];
+  const words = clean.split(" ");
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxLength && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function escapePDFText(value) {
+  return String(value).replace(/[\\()]/g, "\\$&");
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+
 function closePDF() {
   if (state.pdfURL) URL.revokeObjectURL(state.pdfURL);
   state.pdfURL = "";
   state.pdfTitle = "";
+  state.pdfBackLabel = "Close";
   state.modal = null;
 }
 
