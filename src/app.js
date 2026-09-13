@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.13";
+const PUBLIC_VERSION = "v2.14";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -3762,7 +3762,11 @@ function dashboardDetailItems(data, kind, month, cardID) {
         title: tx.title || "Purchase",
         amount: netAmount(tx),
         subtitle: `${tx.cardType || "Card"} · ${formatDate(tx.date)}`,
-        meta: tx.category || "General"
+        meta: tx.category || "General",
+        spentDate: tx.date,
+        category: tx.category || "General",
+        cardLabel: tx.cardType || "Card",
+        kind: "Spent"
       }));
   }
   if (kind === "emiDue") {
@@ -4036,9 +4040,17 @@ function downloadURL(url, fileName) {
 function showDashboardDetailPDF(payload) {
   if (!payload || !["spent", "payable"].includes(payload.kind)) return;
   if (state.pdfURL) URL.revokeObjectURL(state.pdfURL);
+  const data = state.data || emptyData();
   const title = payload.title || "Transactions";
   const monthLabel = payload.month ? monthTitle(payload.month) : monthTitle(fromMonthInput(state.selectedMonth));
-  const bytes = buildTransactionListPDF(title, monthLabel, payload.items || []);
+  const selectedCard = state.selectedCardID ? data.cards.find((card) => card.id === state.selectedCardID) : null;
+  const bytes = buildTransactionListPDF({
+    title,
+    monthLabel,
+    cardFilter: selectedCard ? displayCard(selectedCard) : "All Cards",
+    kind: payload.kind,
+    items: payload.items || []
+  });
   const blob = new Blob([bytes], { type: "application/pdf" });
   state.pdfURL = URL.createObjectURL(blob);
   state.pdfTitle = `${title} PDF`;
@@ -4048,44 +4060,84 @@ function showDashboardDetailPDF(payload) {
   render();
 }
 
-function buildTransactionListPDF(title, monthLabel, items) {
-  const rows = [];
-  rows.push({ size: 18, text: title });
-  rows.push({ size: 11, text: monthLabel });
-  rows.push({ size: 11, text: `Total: ${INR.format(items.reduce((sum, item) => sum + Number(item.amount || 0), 0))}` });
-  rows.push({ size: 9, text: " " });
-  if (!items.length) {
-    rows.push({ size: 11, text: "No records found." });
-  }
-  for (const item of items) {
-    rows.push({ size: 11, text: `${item.title || "Purchase"}    ${INR.format(Number(item.amount || 0))}` });
-    rows.push({ size: 9, text: item.subtitle || "" });
-    if (item.meta) rows.push({ size: 9, text: item.meta });
-    rows.push({ size: 7, text: " " });
-  }
-  return makeSimplePDF(rows);
-}
-
-function makeSimplePDF(rows) {
+function buildTransactionListPDF(report) {
+  const items = report.items || [];
+  const total = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const cards = new Set(items.map(pdfItemCard).filter(Boolean));
+  const categories = new Set(items.map(pdfItemCategory).filter(Boolean));
+  const generatedLabel = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
   const pageWidth = 595;
   const pageHeight = 842;
-  const marginX = 46;
-  const topY = 794;
-  const bottomY = 48;
-  const pages = [];
-  let page = [];
-  let y = topY;
-  for (const row of rows) {
-    const lineHeight = row.size + 6;
-    if (y - lineHeight < bottomY && page.length) {
-      pages.push(page);
-      page = [];
-      y = topY;
-    }
-    page.push({ ...row, y });
-    y -= lineHeight;
+  const margin = 42;
+  const contentWidth = pageWidth - margin * 2;
+  const bottom = 58;
+  const colors = {
+    blue: [0, 122, 255],
+    text: [17, 17, 17],
+    muted: [108, 108, 114],
+    line: [226, 232, 240],
+    softBlue: [238, 247, 255],
+    softGreen: [239, 251, 244],
+    card: [249, 251, 255],
+    green: [52, 199, 89],
+    orange: [255, 149, 0]
+  };
+  const doc = {
+    pages: [],
+    ops: [],
+    y: 0
+  };
+
+  const addPage = (first = false) => {
+    if (doc.ops.length) doc.pages.push(doc.ops);
+    doc.ops = [];
+    doc.y = first ? 790 : 770;
+    if (!first) drawContinuationHeader(doc, report, margin, pageWidth, colors);
+  };
+
+  const ensureSpace = (height) => {
+    if (doc.y - height < bottom) addPage(false);
+  };
+
+  addPage(true);
+  drawReportHeader(doc, report, generatedLabel, margin, pageWidth, colors);
+  doc.y = 690;
+  drawSummaryCards(doc, [
+    { label: "Total Amount", amount: total, tone: "blue" },
+    { label: "Transactions", value: String(items.length), tone: "green" },
+    { label: report.kind === "payable" ? "Categories" : "Cards", value: String(report.kind === "payable" ? categories.size : cards.size), tone: "orange" }
+  ], margin, contentWidth, colors);
+  doc.y -= 98;
+
+  if (report.kind === "payable" && items.length) {
+    const cardPoints = groupedAmountPoints(items, (item) => pdfItemCard(item));
+    const categoryPoints = groupedAmountPoints(items, (item) => pdfItemCategory(item));
+    drawChartPair(doc, cardPoints, categoryPoints, margin, contentWidth, colors);
+    doc.y -= 132;
   }
-  if (page.length) pages.push(page);
+
+  ensureSpace(46);
+  drawText(doc, "Transactions", margin, doc.y, 14, "bold", colors.text);
+  drawText(doc, `${items.length} record${items.length === 1 ? "" : "s"}`, pageWidth - margin, doc.y, 10, "regular", colors.muted, "right");
+  doc.y -= 18;
+  drawLine(doc, margin, doc.y, pageWidth - margin, doc.y, colors.line);
+  doc.y -= 10;
+
+  if (!items.length) {
+    drawEmptyState(doc, margin, contentWidth, colors);
+  }
+
+  for (const item of items) {
+    const row = pdfTransactionRow(item);
+    const titleLines = wrapPDFText(row.title, 58).slice(0, 2);
+    const rowHeight = Math.max(62, 42 + titleLines.length * 12);
+    ensureSpace(rowHeight + 8);
+    drawTransactionPDFRow(doc, row, titleLines, margin, contentWidth, rowHeight, colors);
+    doc.y -= rowHeight;
+  }
+
+  if (doc.ops.length) doc.pages.push(doc.ops);
+  addFooters(doc.pages, report, generatedLabel, margin, pageWidth, pageHeight, colors);
 
   const objects = [];
   const addObject = (content) => {
@@ -4093,17 +4145,12 @@ function makeSimplePDF(rows) {
     return objects.length;
   };
   const fontRef = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const boldFontRef = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
   const pageRefs = [];
-  for (const pageRows of pages) {
-    const stream = pageRows.map((row) => {
-      const lines = wrapPDFText(String(row.text || ""), row.size === 18 ? 58 : 82);
-      return lines.map((line, index) => {
-        const lineY = row.y - index * (row.size + 3);
-        return `BT /F1 ${row.size} Tf ${marginX} ${lineY} Td (${escapePDFText(line)}) Tj ET`;
-      }).join("\n");
-    }).join("\n");
+  for (const pageOps of doc.pages) {
+    const stream = pageOps.join("\n");
     const streamRef = addObject(`<< /Length ${byteLength(stream)} >>\nstream\n${stream}\nendstream`);
-    pageRefs.push(addObject(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRef} 0 R >> >> /Contents ${streamRef} 0 R >>`));
+    pageRefs.push(addObject(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRef} 0 R /F2 ${boldFontRef} 0 R >> >> /Contents ${streamRef} 0 R >>`));
   }
   const pagesRef = addObject(`<< /Type /Pages /Kids [${pageRefs.map((ref) => `${ref} 0 R`).join(" ")}] /Count ${pageRefs.length} >>`);
   for (const ref of pageRefs) {
@@ -4125,8 +4172,208 @@ function makeSimplePDF(rows) {
   return new TextEncoder().encode(pdf);
 }
 
+function drawReportHeader(doc, report, generatedLabel, margin, pageWidth, colors) {
+  drawText(doc, "Kuber", margin, 790, 14, "bold", colors.blue);
+  drawText(doc, `Generated ${generatedLabel}`, pageWidth - margin, 790, 9, "regular", colors.muted, "right");
+  drawText(doc, report.title || "Transactions", margin, 758, 24, "bold", colors.text);
+  drawText(doc, `${report.monthLabel || ""} - ${report.cardFilter || "All Cards"}`, margin, 738, 11, "regular", colors.muted);
+  drawLine(doc, margin, 716, pageWidth - margin, 716, colors.line);
+}
+
+function drawContinuationHeader(doc, report, margin, pageWidth, colors) {
+  drawText(doc, "Kuber", margin, 800, 10, "bold", colors.blue);
+  drawText(doc, `${report.title || "Transactions"} - ${report.monthLabel || ""}`, margin + 48, 800, 10, "bold", colors.text);
+  drawText(doc, report.cardFilter || "All Cards", pageWidth - margin, 800, 9, "regular", colors.muted, "right");
+  drawLine(doc, margin, 786, pageWidth - margin, 786, colors.line);
+}
+
+function drawSummaryCards(doc, cards, margin, contentWidth, colors) {
+  const gap = 10;
+  const width = (contentWidth - gap * 2) / 3;
+  cards.forEach((card, index) => {
+    const x = margin + index * (width + gap);
+    const fill = card.tone === "green" ? colors.softGreen : card.tone === "orange" ? [255, 248, 238] : colors.softBlue;
+    drawRect(doc, x, doc.y - 72, width, 72, fill, colors.line);
+    drawText(doc, card.label, x + 12, doc.y - 22, 8.5, "bold", colors.muted);
+    if (card.amount !== undefined) {
+      drawCurrency(doc, x + 12, doc.y - 50, Number(card.amount || 0), 18, colors.text, "left");
+    } else {
+      drawText(doc, card.value || "0", x + 12, doc.y - 52, 18, "bold", colors.text);
+    }
+  });
+}
+
+function drawChartPair(doc, cardPoints, categoryPoints, margin, contentWidth, colors) {
+  const gap = 12;
+  const width = (contentWidth - gap) / 2;
+  drawBarChart(doc, "Payable by Card", cardPoints, margin, doc.y, width, 112, colors, colors.blue);
+  drawBarChart(doc, "Payable by Category", categoryPoints, margin + width + gap, doc.y, width, 112, colors, colors.green);
+}
+
+function drawBarChart(doc, title, points, x, topY, width, height, colors, accent) {
+  drawRect(doc, x, topY - height, width, height, colors.card, colors.line);
+  drawText(doc, title, x + 12, topY - 18, 10, "bold", colors.text);
+  const rows = compactChartPoints(points).slice(0, 5);
+  const max = Math.max(...rows.map((point) => point.amount), 1);
+  let y = topY - 38;
+  for (const point of rows) {
+    const label = shortChartLabel(point.label, 17);
+    const barWidth = Math.max(10, Math.round(((width - 104) * point.amount) / max));
+    drawText(doc, label, x + 12, y, 7.8, "regular", colors.muted);
+    drawRect(doc, x + 86, y - 7, width - 110, 7, [234, 238, 244], null);
+    drawRect(doc, x + 86, y - 7, barWidth, 7, accent, null);
+    drawCurrency(doc, x + width - 12, y - 1, point.amount, 7.8, colors.text, "right");
+    y -= 15;
+  }
+  if (!rows.length) drawText(doc, "No chart data", x + 12, topY - 48, 9, "regular", colors.muted);
+}
+
+function drawTransactionPDFRow(doc, row, titleLines, margin, contentWidth, rowHeight, colors) {
+  const top = doc.y;
+  const right = margin + contentWidth;
+  drawRect(doc, margin, top - rowHeight + 6, contentWidth, rowHeight - 6, [255, 255, 255], null);
+  titleLines.forEach((line, index) => {
+    drawText(doc, line, margin + 8, top - 14 - index * 12, 10.5, "bold", colors.text);
+  });
+  drawCurrency(doc, right - 8, top - 15, row.amount, 10.5, colors.text, "right");
+  const metaY = top - 34 - (titleLines.length - 1) * 12;
+  drawText(doc, row.metaLine, margin + 8, metaY, 8.6, "regular", colors.muted);
+  drawText(doc, row.dateLine, margin + 8, metaY - 13, 8.6, "regular", colors.muted);
+  drawLine(doc, margin + 8, top - rowHeight + 6, right - 8, top - rowHeight + 6, colors.line);
+}
+
+function drawEmptyState(doc, margin, contentWidth, colors) {
+  drawRect(doc, margin, doc.y - 58, contentWidth, 50, colors.card, colors.line);
+  drawText(doc, "No records found for this report.", margin + 14, doc.y - 37, 11, "regular", colors.muted);
+  doc.y -= 66;
+}
+
+function addFooters(pages, report, generatedLabel, margin, pageWidth, pageHeight, colors) {
+  pages.forEach((ops, index) => {
+    drawLine({ ops }, margin, 38, pageWidth - margin, 38, colors.line);
+    drawText({ ops }, `Kuber - ${report.title || "Transactions"}`, margin, 22, 8, "regular", colors.muted);
+    drawText({ ops }, `Generated ${generatedLabel}`, pageWidth / 2, 22, 8, "regular", colors.muted, "center");
+    drawText({ ops }, `Page ${index + 1} of ${pages.length}`, pageWidth - margin, 22, 8, "regular", colors.muted, "right");
+  });
+}
+
+function pdfTransactionRow(item) {
+  const card = pdfItemCard(item);
+  const category = pdfItemCategory(item);
+  return {
+    title: item.title || "Purchase",
+    amount: Number(item.amount || 0),
+    metaLine: `${card} - ${category}`,
+    dateLine: pdfDateLine(item)
+  };
+}
+
+function pdfItemCard(item) {
+  return item.cardLabel || String(item.subtitle || "").split(/[·-]/)[0]?.trim() || "Card";
+}
+
+function pdfItemCategory(item) {
+  if (item.category) return item.category;
+  if (item.meta && !String(item.meta).startsWith("Spent ")) return item.meta;
+  const parts = String(item.subtitle || "").split(/[·-]/).map((part) => part.trim()).filter(Boolean);
+  return parts[1] || "General";
+}
+
+function pdfDateLine(item) {
+  if (item.meta && String(item.meta).startsWith("Spent ")) return item.meta;
+  if (item.spentDate) return `Spent ${dayMonth(item.spentDate)}`;
+  if (item.date) return `Due ${dayMonth(item.date)}`;
+  return "";
+}
+
+function compactChartPoints(points) {
+  if (points.length <= 5) return points;
+  const visible = points.slice(0, 4);
+  const other = points.slice(4).reduce((sum, point) => sum + Number(point.amount || 0), 0);
+  return [...visible, { label: "Other", amount: other }];
+}
+
+function drawText(doc, text, x, y, size, weight = "regular", color = [0, 0, 0], align = "left") {
+  const clean = pdfSafeText(text);
+  const adjustedX = align === "right" ? x - pdfTextWidth(clean, size) : align === "center" ? x - pdfTextWidth(clean, size) / 2 : x;
+  doc.ops.push(`q ${pdfColor(color, "fill")} BT /${weight === "bold" ? "F2" : "F1"} ${size} Tf ${num(adjustedX)} ${num(y)} Td (${escapePDFText(clean)}) Tj ET Q`);
+}
+
+function drawCurrency(doc, x, y, amount, size, color = [0, 0, 0], align = "right") {
+  const value = formatPDFAmount(amount);
+  const iconWidth = size * 0.46;
+  const gap = size * 0.18;
+  const totalWidth = iconWidth + gap + pdfTextWidth(value, size);
+  const startX = align === "right" ? x - totalWidth : x;
+  drawRupeeIcon(doc, startX, y - size * 0.05, size, color);
+  drawText(doc, value, startX + iconWidth + gap, y, size, "bold", color);
+}
+
+function drawRupeeIcon(doc, x, y, size, color) {
+  const w = size * 0.44;
+  const h = size * 0.78;
+  const top = y + h * 0.86;
+  const mid = y + h * 0.64;
+  const left = x;
+  const right = x + w;
+  const stem = x + w * 0.30;
+  doc.ops.push([
+    "q",
+    pdfColor(color, "stroke"),
+    `${num(Math.max(0.75, size * 0.07))} w`,
+    `${num(left)} ${num(top)} m ${num(right)} ${num(top)} l`,
+    `${num(left)} ${num(mid)} m ${num(right)} ${num(mid)} l`,
+    `${num(stem)} ${num(top)} m ${num(x + w * 0.94)} ${num(top - h * 0.17)} ${num(x + w * 0.82)} ${num(mid)} ${num(stem)} ${num(mid)} c`,
+    `${num(stem)} ${num(mid)} m ${num(right)} ${num(y)} l`,
+    "S Q"
+  ].join(" "));
+}
+
+function drawRect(doc, x, y, width, height, fill, stroke) {
+  const ops = ["q"];
+  if (fill) ops.push(pdfColor(fill, "fill"));
+  if (stroke) ops.push(pdfColor(stroke, "stroke"));
+  ops.push(`${num(x)} ${num(y)} ${num(width)} ${num(height)} re`);
+  ops.push(fill && stroke ? "B" : fill ? "f" : "S");
+  ops.push("Q");
+  doc.ops.push(ops.join(" "));
+}
+
+function drawLine(doc, x1, y1, x2, y2, color) {
+  doc.ops.push(`q ${pdfColor(color, "stroke")} 0.8 w ${num(x1)} ${num(y1)} m ${num(x2)} ${num(y2)} l S Q`);
+}
+
+function pdfColor(color, mode) {
+  const suffix = mode === "stroke" ? "RG" : "rg";
+  return `${color.map((part) => num(part / 255)).join(" ")} ${suffix}`;
+}
+
+function formatPDFAmount(amount) {
+  const rounded = Math.round(Number(amount || 0));
+  const prefix = rounded < 0 ? "-" : "";
+  return `${prefix}${Math.abs(rounded).toLocaleString("en-IN")}`;
+}
+
+function pdfSafeText(value) {
+  return String(value ?? "")
+    .replace(/[₹]/g, "Rs.")
+    .replace(/[·•]/g, "-")
+    .replace(/[–—]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[^\x20-\x7E]/g, "");
+}
+
+function pdfTextWidth(text, size) {
+  return String(text || "").length * size * 0.52;
+}
+
+function num(value) {
+  return Number(value || 0).toFixed(2).replace(/\.00$/, "");
+}
+
 function wrapPDFText(text, maxLength) {
-  const clean = text.replace(/\s+/g, " ").trim();
+  const clean = pdfSafeText(text);
   if (!clean) return [""];
   const words = clean.split(" ");
   const lines = [];
