@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.18";
+const PUBLIC_VERSION = "v2.19";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -3624,7 +3624,12 @@ async function extractTextFromPDF(file) {
       // Some PDF streams are encrypted or use unsupported filters. The import still keeps the file.
     }
   }
-  return chunks.join("\n").replace(/\s+/g, " ").trim();
+  return chunks
+    .join("\n")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function inflateDeflateStream(bytes) {
@@ -3635,7 +3640,7 @@ async function inflateDeflateStream(bytes) {
 function extractPDFVisibleText(raw) {
   const literalStrings = [...raw.matchAll(/\((?:\\.|[^\\)])*\)/g)].map((match) => decodePDFLiteralString(match[0].slice(1, -1)));
   const hexStrings = [...raw.matchAll(/<([0-9a-fA-F\s]{8,})>/g)].map((match) => decodePDFHexString(match[1]));
-  return [...literalStrings, ...hexStrings].filter((text) => /[A-Za-z0-9]/.test(text)).join(" ");
+  return [...literalStrings, ...hexStrings].filter((text) => /[A-Za-z0-9]/.test(text)).join("\n");
 }
 
 function decodePDFLiteralString(value) {
@@ -3652,53 +3657,257 @@ function decodePDFHexString(value) {
     const byte = Number.parseInt(clean.slice(index, index + 2), 16);
     if (Number.isFinite(byte) && byte > 0) codes.push(byte);
   }
-  return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(codes)).replace(/[^\x09\x0A\x0D\x20-\x7E\u20B9]/g, " ");
+  const bytes = new Uint8Array(codes);
+  if (bytes.length >= 2 && ((bytes[0] === 0xfe && bytes[1] === 0xff) || bytes.filter((byte, index) => index % 2 === 0 && byte === 0).length > bytes.length / 3)) {
+    const start = bytes[0] === 0xfe && bytes[1] === 0xff ? 2 : 0;
+    let output = "";
+    for (let index = start; index + 1 < bytes.length; index += 2) {
+      output += String.fromCharCode((bytes[index] << 8) | bytes[index + 1]);
+    }
+    return output.replace(/[^\x09\x0A\x0D\x20-\x7E\u20B9]/g, " ");
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes).replace(/[^\x09\x0A\x0D\x20-\x7E\u20B9]/g, " ");
 }
 
 function parseStatementDetailsFromText(text) {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return {};
-  const type = detectStatementDocumentType(normalized);
-  return {
-    statementDate: findDateNearLabels(normalized, type === "icici"
-      ? ["statement date", "statement generation date", "statement period"]
-      : ["statement date", "statement dt", "statement generated on", "statement generation date"]),
-    dueDate: findDateNearLabels(normalized, ["payment due date", "due date", "payment due dt", "payment due on"]),
-    totalDue: findAmountNearLabels(normalized, ["total amount due", "total amt due", "total due", "amount due", "total outstanding"]),
-    minimumDue: findAmountNearLabels(normalized, ["minimum amount due", "minimum amt due", "minimum due", "min amount due", "min due"])
-  };
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\t/g, " ").trim())
+    .filter(Boolean);
+  if (!lines.length) return {};
+  const normalized = lines.map((line) => line.toLowerCase().replace(/:/g, " "));
+  const joined = normalized.join("\n");
+  if (detectStatementDocumentType(joined) === "hdfc") return parseHDFCStatementDetails(lines, normalized);
+  if (detectStatementDocumentType(joined) === "icici") return parseICICIStatementDetails(lines, normalized);
+  return parseGenericStatementDetails(lines, normalized);
 }
 
 function detectStatementDocumentType(text) {
   const normalized = text.toLowerCase();
-  if (normalized.includes("icici") || normalized.includes("one view statement")) return "icici";
-  if (normalized.includes("hdfc") || normalized.includes("infinia")) return "hdfc";
+  if (normalized.includes("hdfc bank credit cards gstin") || normalized.includes("infinia credit card statement") || normalized.includes("hdfc")) return "hdfc";
+  if (normalized.includes("icici bank credit card gst number") || normalized.includes("credit card one view statement") || normalized.includes("icici")) return "icici";
   return "generic";
 }
 
-function findDateNearLabels(text, labels) {
-  for (const label of labels) {
-    const regex = new RegExp(`${escapeRegExp(label)}\\s*[:\\-]?\\s*(${datePatternSource()})`, "i");
-    const match = text.match(regex);
-    const parsed = match ? parseStatementDateToken(match[1]) : null;
-    if (parsed) return parsed;
+function parseGenericStatementDetails(lines, normalized) {
+  return {
+    statementDate: extractStatementDate(["statement date", "statement dt", "statement generated on", "statement generation date"], lines, normalized),
+    dueDate: extractStatementDate(["payment due date", "due date", "payment due dt", "payment due on"], lines, normalized),
+    totalDue: extractStatementAmount(["total amount due", "total due", "total outstanding"], ["minimum amount due", "minimum due", "min amount due", "min due"], lines, normalized),
+    minimumDue: extractStatementAmount(["minimum amount due", "minimum due", "min amount due", "min due"], [], lines, normalized)
+  };
+}
+
+function parseHDFCStatementDetails(lines, normalized) {
+  const fullText = lines.join("\n");
+  const compact = compactStatementText(fullText);
+  const result = {
+    statementDate: hdfcStatementDate(compact),
+    dueDate: hdfcDueDate(compact),
+    totalDue: firstAmountMatching(/total\s+amount\s+due\s+[C₹`]?\s*([0-9,]+\.\d{2})/i, compact),
+    minimumDue: firstAmountMatching(/minimum\s+due\s+[C₹`]?\s*([0-9,]+\.\d{2})/i, compact)
+  };
+
+  if (!result.statementDate) result.statementDate = extractStatementDate(["statement date"], lines, normalized, 8);
+  if (!result.dueDate) result.dueDate = extractStatementDate(["due date"], lines, normalized, 8);
+  if (!result.statementDate) result.statementDate = firstDateMatching(/statement\s+date\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})/i, compact);
+  if (!result.dueDate) result.dueDate = firstDateMatching(/due\s+date\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})/i, compact);
+  if (!result.statementDate) result.statementDate = firstDateAfter("statement date", fullText, 120);
+  if (!result.dueDate) result.dueDate = firstDateAfter("due date", fullText, 120);
+  if (!result.totalDue) result.totalDue = firstAmountAfter("total amount due", fullText, 80);
+  if (!result.minimumDue) result.minimumDue = firstAmountAfter("minimum due", fullText, 80);
+
+  const generic = parseGenericStatementDetails(lines, normalized);
+  return {
+    statementDate: result.statementDate || generic.statementDate,
+    dueDate: result.dueDate || generic.dueDate,
+    totalDue: result.totalDue || generic.totalDue,
+    minimumDue: result.minimumDue || generic.minimumDue
+  };
+}
+
+function hdfcStatementDate(compactText) {
+  return secondDateMatching(/billing\s+period\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})\s*-\s*(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})/i, compactText)
+    || firstDateMatching(/statement\s+date\s+.*?(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})/i, compactText);
+}
+
+function hdfcDueDate(compactText) {
+  const patterns = [
+    /current\s+dues\s+[C₹`]?\s*[0-9,]+\.\d{2}\s+due\s+date\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})\s+minimum\s+dues/i,
+    /due\s+date\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})\s+minimum\s+dues/i,
+    /minimum\s+dues\s+[C₹`]?\s*[0-9,]+\.\d{2}\s+.*?due\s+date\s+(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4})/i
+  ];
+  for (const pattern of patterns) {
+    const date = firstDateMatching(pattern, compactText);
+    if (date) return date;
   }
   return null;
 }
 
-function findAmountNearLabels(text, labels) {
-  for (const label of labels) {
-    const regex = new RegExp(`${escapeRegExp(label)}\\s*[:\\-]?\\s*(?:Rs\\.?|INR|₹)?\\s*([0-9][0-9,]*(?:\\.\\d{1,2})?)`, "i");
-    const match = text.match(regex);
-    const parsed = match ? parseStatementAmount(match[1]) : null;
-    if (parsed !== null) return parsed;
+function parseICICIStatementDetails(lines, normalized) {
+  const fullText = lines.join("\n");
+  const compact = compactStatementText(fullText);
+  const summaryBlock = iciciSummaryBlockDetails(compact);
+  const result = {
+    statementDate: firstDateMatching(/statement\s+date(?:\s+statement\s+date)?\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})/i, compact),
+    dueDate: summaryBlock.dueDate || firstDateMatching(/payment\s+due\s+date(?:\s+payment\s+due\s+date)?\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})/i, compact),
+    totalDue: summaryBlock.totalDue || firstAmountMatching(/total\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})/i, compact),
+    minimumDue: summaryBlock.minimumDue || firstAmountMatching(/minimum\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})/i, compact)
+  };
+
+  if (!result.statementDate) result.statementDate = extractStatementDate(["statement date"], lines, normalized, 5);
+  if (!result.dueDate) result.dueDate = extractStatementDate(["payment due date"], lines, normalized, 5);
+  if (!result.totalDue) {
+    result.totalDue = extractStatementAmount(["total amount due"], ["minimum amount due", "minimum due", "current dues", "minimum dues"], lines, normalized, 6);
+  }
+  if (!result.minimumDue) {
+    result.minimumDue = extractStatementAmount(
+      ["minimum amount due"],
+      ["current dues", "minimum dues", "minimum payment due", "minimum payment amount", "payment option"],
+      lines,
+      normalized,
+      5
+    );
+  }
+
+  const generic = parseGenericStatementDetails(lines, normalized);
+  if (!result.statementDate) result.statementDate = generic.statementDate;
+  if (!result.dueDate) result.dueDate = generic.dueDate;
+  if (!result.totalDue) result.totalDue = generic.totalDue;
+  if (!result.minimumDue) {
+    result.minimumDue = firstAmountMatching(/minimum\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+due\s+date/i, compact) || summaryBlock.minimumDue;
+  }
+  return result;
+}
+
+function iciciSummaryBlockDetails(compactText) {
+  const patterns = [
+    { regex: /total\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+minimum\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+due\s+date\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})/i, groups: ["totalDue", "minimumDue", "dueDate"] },
+    { regex: /total\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+minimum\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+payment\s+due\s+date\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})/i, groups: ["totalDue", "minimumDue", "dueDate"] },
+    { regex: /minimum\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+due\s+date\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}).*?total\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})/i, groups: ["minimumDue", "dueDate", "totalDue"] },
+    { regex: /minimum\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})\s+payment\s+due\s+date\s+([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}).*?total\s+amount\s+due\s+[₹`C]?\s*([0-9,]+\.\d{2})/i, groups: ["minimumDue", "dueDate", "totalDue"] }
+  ];
+  for (const pattern of patterns) {
+    const match = compactText.match(pattern.regex);
+    if (!match) continue;
+    const result = {};
+    pattern.groups.forEach((group, index) => {
+      result[group] = group.endsWith("Date") ? parseStatementDateToken(match[index + 1]) : parseStatementAmount(match[index + 1]);
+    });
+    if (result.minimumDue || result.totalDue || result.dueDate) return result;
+  }
+  return {};
+}
+
+function extractStatementDate(labels, lines, normalized, lookahead = 2) {
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (!labels.some((label) => normalized[index].includes(label))) continue;
+    const end = Math.min(index + lookahead, lines.length - 1);
+    for (let candidateIndex = index; candidateIndex <= end; candidateIndex += 1) {
+      const date = firstDateIn(lines[candidateIndex]);
+      if (date) return date;
+    }
   }
   return null;
 }
 
-function datePatternSource() {
-  const months = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
-  return `(?:\\d{1,2}[\\-/\\. ](?:\\d{1,2}|${months})[\\-/\\. ,]+\\d{2,4}|(?:${months})[\\-/\\. ]\\d{1,2}[\\-/\\. ,]+\\d{2,4})`;
+function extractStatementAmount(labels, excludedLabels, lines, normalized, lookahead = 4) {
+  for (let index = 0; index < normalized.length; index += 1) {
+    const line = normalized[index];
+    if (!labels.some((label) => line.includes(label))) continue;
+    if (excludedLabels.some((label) => line.includes(label))) continue;
+    const sameLineValue = firstAmountIn(lines[index]);
+    if (sameLineValue) return sameLineValue;
+    const end = Math.min(index + lookahead, lines.length - 1);
+    for (let nextIndex = index + 1; nextIndex <= end; nextIndex += 1) {
+      if (isStatementFieldLabelLine(normalized[nextIndex])) break;
+      const amount = firstAmountIn(lines[nextIndex]);
+      if (amount) return amount;
+    }
+  }
+  return null;
+}
+
+function isStatementFieldLabelLine(normalizedLine) {
+  return [
+    "statement date",
+    "statement dt",
+    "statement generated on",
+    "statement generation date",
+    "payment due date",
+    "payment due dt",
+    "payment due on",
+    "due date",
+    "total amount due",
+    "total due",
+    "total outstanding",
+    "minimum amount due",
+    "minimum due",
+    "min amount due",
+    "min due"
+  ].some((label) => normalizedLine.includes(label));
+}
+
+function firstDateIn(text) {
+  const patterns = [
+    /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/,
+    /\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b/,
+    /\b[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4}\b/
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || "").match(pattern);
+    if (!match) continue;
+    const date = parseStatementDateToken(match[0]);
+    if (date) return date;
+  }
+  return null;
+}
+
+function firstDateMatching(pattern, text) {
+  const match = String(text || "").match(pattern);
+  return match?.[1] ? parseStatementDateToken(match[1]) : null;
+}
+
+function secondDateMatching(pattern, text) {
+  const match = String(text || "").match(pattern);
+  return match?.[2] ? parseStatementDateToken(match[2]) : null;
+}
+
+function firstDateAfter(label, text, lookahead) {
+  const snippet = snippetAfter(label, text, lookahead);
+  return snippet ? firstDateIn(snippet) : null;
+}
+
+function firstAmountIn(text) {
+  const matches = [...String(text || "").matchAll(/(?:^|[^\d])(?:Rs\.?|INR|₹)?\s*([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/gi)];
+  for (const match of matches) {
+    const amount = parseStatementAmount(match[1]);
+    if (amount && amount > 0) return amount;
+  }
+  return null;
+}
+
+function firstAmountMatching(pattern, text) {
+  const match = String(text || "").match(pattern);
+  return match?.[1] ? parseStatementAmount(match[1]) : null;
+}
+
+function firstAmountAfter(label, text, lookahead) {
+  const snippet = snippetAfter(label, text, lookahead);
+  return snippet ? firstAmountIn(snippet) : null;
+}
+
+function compactStatementText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function snippetAfter(label, text, lookahead) {
+  const source = String(text || "");
+  const lower = source.toLowerCase();
+  const index = lower.indexOf(String(label || "").toLowerCase());
+  if (index < 0) return "";
+  const start = index + String(label || "").length;
+  return source.slice(start, start + lookahead);
 }
 
 function parseStatementDateToken(value) {
