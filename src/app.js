@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.14";
+const PUBLIC_VERSION = "v2.15";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -774,13 +774,19 @@ function payableDetailChartsTemplate(items) {
   const cardPoints = groupedAmountPoints(payableItems, (item) => item.cardLabel || "Unknown");
   const categoryPoints = groupedAmountPoints(payableItems.filter((item) => item.category), (item) => item.category || "Other");
   return `
-    <section class="detail-chart-section">
-      <h3>Payable by Card</h3>
-      ${cardPoints.length ? detailBarChartTemplate(cardPoints, "teal") : `<p class="list-empty">No card data available</p>`}
+    <section class="detail-chart-section compact-chart-card">
+      <div class="detail-chart-title">
+        <h3>Payable by Card</h3>
+        <span>${INR.format(cardPoints.reduce((sum, point) => sum + point.amount, 0))}</span>
+      </div>
+      ${cardPoints.length ? detailRankedBarsTemplate(cardPoints, "card") : `<p class="list-empty">No card data available</p>`}
     </section>
-    <section class="detail-chart-section">
-      <h3>Payable by Category</h3>
-      ${categoryPoints.length ? detailBarChartTemplate(categoryPoints, "blue") : `<p class="list-empty">No category data available</p>`}
+    <section class="detail-chart-section compact-chart-card">
+      <div class="detail-chart-title">
+        <h3>Payable by Category</h3>
+        <span>${categoryPoints.length} ${categoryPoints.length === 1 ? "category" : "categories"}</span>
+      </div>
+      ${categoryPoints.length ? detailCategoryGridTemplate(categoryPoints) : `<p class="list-empty">No category data available</p>`}
     </section>
   `;
 }
@@ -797,15 +803,35 @@ function groupedAmountPoints(items, labelForItem) {
     .sort((a, b) => b.amount - a.amount);
 }
 
-function detailBarChartTemplate(points, tone) {
+function detailRankedBarsTemplate(points, tone) {
+  const total = points.reduce((sum, point) => sum + Number(point.amount || 0), 0) || 1;
   const max = Math.max(...points.map((point) => point.amount), 1);
   return `
-    <div class="detail-bar-chart ${tone}" style="--bar-count:${points.length}">
+    <div class="detail-ranked-bars ${tone}">
       ${points.map((point) => `
-        <div class="detail-bar-column">
-          <small>${INR.format(point.amount)}</small>
-          <div class="detail-bar-track"><i style="height:${Math.max(5, Math.round((point.amount / max) * 100))}%"></i></div>
-          <span>${escapeHTML(shortChartLabel(point.label, tone === "teal" ? 12 : 10))}</span>
+        <div class="detail-ranked-row">
+          <div class="detail-ranked-line">
+            <strong>${escapeHTML(point.label)}</strong>
+            <span>${INR.format(point.amount)} · ${Math.round((point.amount / total) * 100)}%</span>
+          </div>
+          <div class="detail-progress-track"><i style="width:${Math.max(5, Math.round((point.amount / max) * 100))}%"></i></div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function detailCategoryGridTemplate(points) {
+  const max = Math.max(...points.map((point) => point.amount), 1);
+  return `
+    <div class="detail-category-grid">
+      ${points.map((point) => `
+        <div class="detail-category-tile">
+          <div class="detail-category-line">
+            <strong>${escapeHTML(point.label)}</strong>
+            <span>${INR.format(point.amount)}</span>
+          </div>
+          <div class="detail-micro-track"><i style="width:${Math.max(5, Math.round((point.amount / max) * 100))}%"></i></div>
         </div>
       `).join("")}
     </div>
