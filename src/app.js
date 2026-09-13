@@ -36,7 +36,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.9";
+const PUBLIC_VERSION = "v2.10";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -190,7 +190,32 @@ async function refreshState() {
   state.runtimeHealth = runtimeHealthSnapshot();
 }
 
+const scrollPositions = new Map();
+
+function rememberScrollPositions() {
+  if (!app) return;
+  app.querySelectorAll("[data-scroll-key]").forEach((element) => {
+    scrollPositions.set(element.dataset.scrollKey, {
+      left: element.scrollLeft,
+      top: element.scrollTop
+    });
+  });
+}
+
+function restoreScrollPositions() {
+  const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 0));
+  schedule(() => {
+    app.querySelectorAll("[data-scroll-key]").forEach((element) => {
+      const position = scrollPositions.get(element.dataset.scrollKey);
+      if (!position) return;
+      element.scrollLeft = position.left;
+      element.scrollTop = position.top;
+    });
+  });
+}
+
 function render() {
+  rememberScrollPositions();
   app.innerHTML = `
     <main class="phone-shell">
       <section class="screen">
@@ -229,6 +254,7 @@ function render() {
   `;
 
   bindEvents();
+  restoreScrollPositions();
 }
 
 function dashboardTemplate() {
@@ -251,7 +277,7 @@ function dashboardTemplate() {
   const cardName = selectedCardID ? displayCard(data.cards.find((card) => card.id === selectedCardID)) : "All Cards";
 
   return `
-    <div class="scroll-view">
+    <div class="scroll-view" data-scroll-key="dashboard">
       <header class="dashboard-header dashboard-month-card" data-month-swipe>
         <div>
           <p class="eyebrow">Dashboard</p>
@@ -581,7 +607,7 @@ function moreTemplate() {
   ];
 
   return `
-    <div class="scroll-view">
+    <div class="scroll-view" data-scroll-key="more">
       <header class="page-header">
         <h1>More</h1>
         <p>Your control center for records, plans, statements, wishlist and setup.</p>
@@ -720,7 +746,7 @@ function dashboardDetailSheetTemplate(payload) {
             ? `<button type="button" class="toolbar-button confirm icon-toolbar-button" data-action="dashboard-detail-pdf" aria-label="Show PDF">${iconGlyph("doc")}</button>`
             : "<span></span>"}
         </header>
-        <div class="sheet-list">
+        <div class="sheet-list" data-scroll-key="dashboard-detail-${escapeAttr(payload.kind || "detail")}-${escapeAttr(payload.month ? monthInputValue(payload.month) : state.selectedMonth)}-${escapeAttr(state.selectedCardID || "all")}">
           ${payload.kind === "payable" ? payableDetailChartsTemplate(payload.items) : ""}
           ${payload.items.length ? payload.items.map(dashboardDetailRowTemplate).join("") : `<p class="list-empty">No records found.</p>`}
         </div>
@@ -820,7 +846,7 @@ function destinationPanelTemplate(destination) {
         <h2 id="panel-title">${config.title}</h2>
         <span></span>
       </header>
-      <div class="panel-content">
+      <div class="panel-content" data-scroll-key="destination-${escapeAttr(destination)}">
         ${config.body}
       </div>
     </section>
@@ -977,7 +1003,7 @@ function budgetForecastSheetTemplate() {
           <h2 id="budget-forecast-title">Create Budget</h2>
           <button type="button" class="toolbar-button confirm" data-budget-action="apply-forecast" ${newSuggestions.length ? "" : "disabled"}>Apply</button>
         </header>
-        <div class="form-list">
+        <div class="form-list" data-scroll-key="budget-forecast-${escapeAttr(state.budgetMonth)}">
           <section class="card plain-card">
             <div class="section-title">
               <h2>${new Date(month).toLocaleDateString("en-IN", { month: "long", year: "numeric" })}</h2>
@@ -1778,7 +1804,7 @@ function pdfViewerTemplate() {
         <h2 id="pdf-title">${escapeHTML(state.pdfTitle || "Statement")}</h2>
         <button type="button" class="toolbar-button confirm" data-action="download-active-pdf">Open</button>
       </header>
-      <div class="pdf-frame-wrap">
+      <div class="pdf-frame-wrap" data-scroll-key="pdf-${escapeAttr(state.pdfTitle || "statement")}">
         <iframe class="pdf-frame" src="${escapeAttr(state.pdfURL)}" title="${escapeAttr(state.pdfTitle || "Statement PDF")}"></iframe>
       </div>
     </section>
@@ -1799,7 +1825,7 @@ function statementPaymentsTemplate(statement) {
         <h2 id="payments-title">Payment History</h2>
         <span></span>
       </header>
-      <div class="panel-content">
+      <div class="panel-content" data-scroll-key="statement-payments-${escapeAttr(statement.id)}">
         <section class="card">
           <div class="section-title">
             <h2>${escapeHTML(statement.cardType || "Statement")}</h2>
