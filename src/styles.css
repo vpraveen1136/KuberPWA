@@ -1531,6 +1531,15 @@ button:disabled {
   opacity: 1;
 }
 
+.statement-actions {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+.statement-actions button {
+  min-width: 74px;
+}
+
 .statement-row {
   border-left: 4px solid transparent;
 }

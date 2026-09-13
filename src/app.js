@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.11";
+const PUBLIC_VERSION = "v2.12";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -1554,9 +1554,8 @@ function statementRowTemplate(statement) {
         <span>Paid: ${INR.format(status.paid)} · Balance: ${INR.format(status.outstanding)}</span>
         <div class="progress-track statement-progress"><i style="width:${progress}%"></i></div>
         <span>${escapeHTML(statement.fileName || "Statement file")}</span>
-        <div class="row-actions">
+        <div class="row-actions statement-actions">
           <button type="button" data-statement-action="payments" data-id="${escapeAttr(statement.id)}">Payments</button>
-          <button type="button" data-statement-action="import-csv" data-id="${escapeAttr(statement.id)}">Import CSV</button>
           <button type="button" data-statement-action="edit" data-id="${escapeAttr(statement.id)}">Edit</button>
           <button type="button" data-statement-action="view" data-id="${escapeAttr(statement.id)}" ${file ? "" : "disabled"}>View</button>
           <button type="button" data-statement-action="download" data-id="${escapeAttr(statement.id)}" ${file ? "" : "disabled"}>Download</button>
