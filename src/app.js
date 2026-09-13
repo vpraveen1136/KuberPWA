@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.12";
+const PUBLIC_VERSION = "v2.13";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -225,9 +225,9 @@ function render() {
       </section>
       <nav class="tabbar" aria-label="Main navigation">
         ${tabButton("dashboard", "chart", "Dashboard")}
-        <button class="tab-action" type="button" data-action="add-purchase" aria-label="Add purchase">
-          <span class="action-icon">+</span>
-          <span>Add</span>
+        <button class="tab-button ${state.destination === "transactions" ? "active" : ""}" type="button" data-action="open-transactions" aria-label="Transactions">
+          <span>${iconGlyph("list")}</span>
+          <span>Transactions</span>
         </button>
         ${tabButton("more", "grid", "More")}
       </nav>
@@ -282,9 +282,12 @@ function dashboardTemplate() {
   return `
     <div class="scroll-view" data-scroll-key="dashboard">
       <header class="dashboard-header dashboard-month-card" data-month-swipe>
-        <div>
-          <p class="eyebrow">Dashboard</p>
-          <h1>Kuber <span class="title-version">${PUBLIC_VERSION}</span></h1>
+        <div class="dashboard-title-row">
+          <div>
+            <p class="eyebrow">Dashboard</p>
+            <h1>Kuber <span class="title-version">${PUBLIC_VERSION}</span></h1>
+          </div>
+          ${topAddButton()}
         </div>
         <div class="ios-month-control" aria-label="Selected month">
           <button type="button" data-action="month-prev" aria-label="Previous month">‹</button>
@@ -612,8 +615,13 @@ function moreTemplate() {
   return `
     <div class="scroll-view" data-scroll-key="more">
       <header class="page-header">
-        <h1>More</h1>
-        <p>Your control center for records, plans, statements, wishlist and setup.</p>
+        <div class="page-title-row">
+          <div>
+            <h1>More</h1>
+            <p>Your control center for records, plans, statements, wishlist and setup.</p>
+          </div>
+          ${topAddButton()}
+        </div>
       </header>
       <section class="more-grid">
         ${items.map(([id, title, icon]) => `
@@ -745,9 +753,12 @@ function dashboardDetailSheetTemplate(payload) {
         <header class="sheet-toolbar">
           <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
           <h2 id="dashboard-detail-title">${escapeHTML(payload.title)}</h2>
-          ${payload.kind === "spent" || payload.kind === "payable"
-            ? `<button type="button" class="toolbar-button confirm icon-toolbar-button" data-action="dashboard-detail-pdf" aria-label="Show PDF">${iconGlyph("doc")}</button>`
-            : "<span></span>"}
+          <div class="sheet-toolbar-actions">
+            ${payload.kind === "spent" || payload.kind === "payable"
+              ? `<button type="button" class="toolbar-button confirm icon-toolbar-button" data-action="dashboard-detail-pdf" aria-label="Show PDF">${iconGlyph("doc")}</button>`
+              : ""}
+            ${topAddButton("toolbar-add-button")}
+          </div>
         </header>
         <div class="sheet-list" data-scroll-key="dashboard-detail-${escapeAttr(payload.kind || "detail")}-${escapeAttr(payload.month ? monthInputValue(payload.month) : state.selectedMonth)}-${escapeAttr(state.selectedCardID || "all")}">
           ${payload.kind === "payable" ? payableDetailChartsTemplate(payload.items) : ""}
@@ -847,7 +858,7 @@ function destinationPanelTemplate(destination) {
       <header class="panel-nav">
         <button type="button" class="back-button" data-action="close-destination">‹ More</button>
         <h2 id="panel-title">${config.title}</h2>
-        <span></span>
+        ${topAddButton("toolbar-add-button")}
       </header>
       <div class="panel-content" data-scroll-key="destination-${escapeAttr(destination)}">
         ${config.body}
@@ -1865,7 +1876,7 @@ function statementPaymentsTemplate(statement) {
       <header class="panel-nav">
         <button type="button" class="back-button" data-action="close-payment-panel">‹ Statements</button>
         <h2 id="payments-title">Payment History</h2>
-        <span></span>
+        ${topAddButton("toolbar-add-button")}
       </header>
       <div class="panel-content" data-scroll-key="statement-payments-${escapeAttr(statement.id)}">
         <section class="card">
@@ -2116,10 +2127,19 @@ function panelSummary(title, rows, note) {
 }
 
 function tabButton(tab, icon, label) {
+  const isActive = state.tab === tab && !(tab === "more" && state.destination === "transactions");
   return `
-    <button class="tab-button ${state.tab === tab ? "active" : ""}" type="button" data-tab="${tab}">
+    <button class="tab-button ${isActive ? "active" : ""}" type="button" data-tab="${tab}">
       <span>${iconGlyph(icon)}</span>
       <span>${label}</span>
+    </button>
+  `;
+}
+
+function topAddButton(extraClass = "") {
+  return `
+    <button class="top-add-button ${escapeAttr(extraClass)}" type="button" data-action="add-purchase" aria-label="Add purchase">
+      <span aria-hidden="true">+</span>
     </button>
   `;
 }
@@ -2152,6 +2172,10 @@ function bindEvents() {
       state.destination = null;
       render();
     });
+  });
+
+  app.querySelector("[data-action='open-transactions']")?.addEventListener("click", () => {
+    openDestination("transactions");
   });
 
   app.querySelector("[data-control='selected-month']")?.addEventListener("change", (event) => {
@@ -2472,10 +2496,12 @@ function bindEvents() {
     render();
   });
 
-  app.querySelector("[data-action='add-purchase']")?.addEventListener("click", () => {
-    state.modal = "addPurchase";
-    history.pushState({ kuber: true }, "", location.href);
-    render();
+  app.querySelectorAll("[data-action='add-purchase']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.modal = "addPurchase";
+      history.pushState({ kuber: true }, "", location.href);
+      render();
+    });
   });
 
   app.querySelector("[data-action='add-inline-category']")?.addEventListener("click", async () => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "kuber-pwa-shell-v34";
+const CACHE_NAME = "kuber-pwa-shell-v35";
 const APP_SHELL = [
   "./",
   "./index.html",

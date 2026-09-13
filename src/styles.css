@@ -525,6 +525,40 @@ button {
   display: block;
 }
 
+.dashboard-title-row,
+.page-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.page-title-row > div,
+.dashboard-title-row > div {
+  min-width: 0;
+}
+
+.top-add-button {
+  flex: 0 0 auto;
+  width: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--blue);
+  box-shadow: 0 8px 18px rgba(0, 122, 255, 0.18);
+}
+
+.top-add-button span {
+  font-size: 27px;
+  font-weight: 650;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
 .eyebrow {
   margin: 0 0 2px;
   color: var(--muted);
@@ -1217,6 +1251,25 @@ button:disabled {
   background: var(--blue-soft);
   font-size: 18px;
   text-align: center;
+}
+
+.sheet-toolbar-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.toolbar-add-button {
+  width: 36px;
+  min-height: 36px;
+  justify-self: end;
+  box-shadow: none;
+}
+
+.toolbar-add-button span {
+  font-size: 24px;
 }
 
 .form-list {
