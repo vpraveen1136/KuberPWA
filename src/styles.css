@@ -1423,6 +1423,20 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.statement-toolbar-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.statement-toolbar-actions .inline-button {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .embedded-form {
   display: grid;
   gap: 10px;

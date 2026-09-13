@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.16";
+const PUBLIC_VERSION = "v2.17";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -1553,8 +1553,14 @@ function statementsPanelTemplate() {
     <section class="card statement-toolbar-card">
       <div class="section-title">
         <h2>Statements</h2>
-        <button class="inline-button" type="button" data-statement-action="add">Upload</button>
+        <div class="statement-toolbar-actions">
+          <button class="inline-button" type="button" data-statement-action="sync-folder">Sync Folder</button>
+          <button class="inline-button" type="button" data-statement-action="sync-files">Choose PDFs</button>
+          <button class="inline-button" type="button" data-statement-action="add">Upload</button>
+        </div>
       </div>
+      <input hidden type="file" data-control="statement-folder-input" webkitdirectory multiple accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg">
+      <input hidden type="file" data-control="statement-files-input" multiple accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg">
     </section>
     ${data.cards.length ? `
       <div class="chip-row panel-chips" aria-label="Statement card filter">
@@ -2341,6 +2347,30 @@ function bindEvents() {
     });
   });
 
+  app.querySelector("[data-control='statement-folder-input']")?.addEventListener("change", async (event) => {
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    if (!files.length) return;
+    await runBusy(async () => {
+      const summary = await syncStatementsFromFiles(files, { requireFolderPath: true });
+      state.importStatus = statementSyncSummaryMessage(summary);
+      await refreshState();
+    });
+    render();
+  });
+
+  app.querySelector("[data-control='statement-files-input']")?.addEventListener("change", async (event) => {
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    if (!files.length) return;
+    await runBusy(async () => {
+      const summary = await syncStatementsFromFiles(files, { requireFolderPath: false });
+      state.importStatus = statementSyncSummaryMessage(summary);
+      await refreshState();
+    });
+    render();
+  });
+
   app.querySelectorAll("[data-transaction-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       await handleTransactionAction(button.dataset.transactionAction, button.dataset.id);
@@ -3051,6 +3081,14 @@ async function handleStatementAction(action, id) {
     render();
     return;
   }
+  if (action === "sync-folder") {
+    app.querySelector("[data-control='statement-folder-input']")?.click();
+    return;
+  }
+  if (action === "sync-files") {
+    app.querySelector("[data-control='statement-files-input']")?.click();
+    return;
+  }
   const statement = data.statements.find((item) => item.id === id);
   if (!statement) return;
   if (action === "payments") {
@@ -3360,6 +3398,371 @@ async function saveStatement(id, form) {
     : [...data.statements, statement];
   data.statementFiles = nextFiles;
   await saveAllData(data);
+}
+
+async function syncStatementsFromFiles(files, options = {}) {
+  const data = await getAllData();
+  const summary = {
+    matchedCards: 0,
+    scannedFiles: 0,
+    importedStatements: 0,
+    updatedStatements: 0,
+    autoFilledStatements: 0,
+    skippedFiles: 0
+  };
+  const matchedCardIDs = new Set();
+  const supported = new Set(["pdf", "png", "jpg", "jpeg"]);
+
+  for (const file of files) {
+    const extension = fileExtension(file.name);
+    if (!supported.has(extension)) {
+      summary.skippedFiles += 1;
+      continue;
+    }
+
+    const match = statementSyncTargetForFile(file, data.cards, options);
+    if (!match) {
+      summary.skippedFiles += 1;
+      continue;
+    }
+
+    summary.scannedFiles += 1;
+    matchedCardIDs.add(match.card.id);
+
+    const existingIndex = data.statements.findIndex((statement) => statementMatchesSyncTarget(statement, match.card, match.statementMonth));
+    const attachment = await fileToStatementAttachment(file);
+
+    if (existingIndex >= 0) {
+      const existing = data.statements[existingIndex];
+      data.statementFiles = data.statementFiles.filter((candidate) => candidate.id !== existing.storedFileName);
+      data.statementFiles.push(attachment);
+      data.statements[existingIndex] = {
+        ...existing,
+        cardID: existing.cardID || match.card.id,
+        cardType: displayCard(match.card),
+        fileName: attachment.fileName,
+        storedFileName: attachment.id,
+        hasStoredFile: true
+      };
+      if (statementNeedsAutoFill(data.statements[existingIndex])) {
+        const didAutoFill = await autoFillStatementFromFile(data.statements[existingIndex], file, match.card);
+        if (didAutoFill) summary.autoFilledStatements += 1;
+      }
+      summary.updatedStatements += 1;
+    } else {
+      const statement = {
+        id: crypto.randomUUID(),
+        cardID: match.card.id,
+        cardType: displayCard(match.card),
+        statementMonth: match.statementMonth.toISOString(),
+        statementDate: null,
+        autoReadAttempted: false,
+        autoReadDetectedFieldCount: 0,
+        dueDate: statementDueDateForCard(match.statementMonth, match.card).toISOString(),
+        totalDue: 0,
+        minimumDue: 0,
+        fileName: attachment.fileName,
+        storedFileName: attachment.id,
+        hasStoredFile: true,
+        createdAt: new Date().toISOString()
+      };
+      await autoFillStatementFromFile(statement, file, match.card).then((didAutoFill) => {
+        if (didAutoFill) summary.autoFilledStatements += 1;
+      });
+      data.statementFiles.push(attachment);
+      data.statements.push(statement);
+      summary.importedStatements += 1;
+    }
+  }
+
+  summary.matchedCards = matchedCardIDs.size;
+  mergeDuplicateStatements(data);
+  data.statements.sort((a, b) => new Date(b.dueDate) - new Date(a.dueDate));
+  await saveAllData(data);
+  return summary;
+}
+
+function statementSyncTargetForFile(file, cards, options = {}) {
+  const rawPath = file.webkitRelativePath || file.name || "";
+  const parts = rawPath.split(/[\\/]/).map((part) => part.trim()).filter(Boolean);
+  const fileName = parts.at(-1) || file.name || "";
+  const baseName = fileName.replace(/\.[^.]+$/, "");
+  const statementMonth = parsedStatementMonthFromName(baseName);
+  if (!statementMonth) return null;
+  const fileYear = statementMonth.getFullYear();
+  if (fileYear < 2025) return null;
+
+  const yearSegment = parts.find((part) => /^\d{4}$/.test(part) && Number(part) >= 2025);
+  if (options.requireFolderPath && (!yearSegment || Number(yearSegment) !== fileYear)) return null;
+
+  const card = cards.find((candidate) => {
+    const names = [candidate.nickname, displayCard(candidate), candidate.last4Digits, candidate.bankName]
+      .map((value) => normalizeSyncName(value))
+      .filter(Boolean);
+    const searchParts = options.requireFolderPath ? parts.slice(0, -1) : parts;
+    return searchParts.some((part) => {
+      const normalized = normalizeSyncName(part);
+      return names.some((name) => normalized === name || normalized.includes(name));
+    });
+  });
+  if (!card) return null;
+  return { card, statementMonth };
+}
+
+function parsedStatementMonthFromName(fileBaseName) {
+  const match = String(fileBaseName || "").match(/\b(\d{2})-(\d{2,4})\b/);
+  if (!match) return null;
+  const month = Number(match[1]);
+  const rawYear = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  const year = rawYear < 100 ? 2000 + rawYear : rawYear;
+  if (year < 2025) return null;
+  return new Date(year, month - 1, 1);
+}
+
+function statementDueDateForCard(statementMonth, card) {
+  const month = monthStart(statementMonth);
+  const dueMonth = addMonths(month, Number(card.paymentDueDay || 20) > Number(card.statementDay || 1) ? 0 : 1);
+  const maxDay = new Date(dueMonth.getFullYear(), dueMonth.getMonth() + 1, 0).getDate();
+  return new Date(dueMonth.getFullYear(), dueMonth.getMonth(), Math.min(Number(card.paymentDueDay || 20), maxDay));
+}
+
+function statementMatchesSyncTarget(statement, card, month) {
+  if (!sameMonth(statement.statementMonth, month)) return false;
+  if (statement.cardID === card.id) return true;
+  const normalizedType = normalizeSyncName(statement.cardType);
+  return normalizedType === normalizeSyncName(displayCard(card)) || normalizedType === normalizeSyncName(card.nickname);
+}
+
+function statementNeedsAutoFill(statement) {
+  return !statement.statementDate || Number(statement.totalDue || 0) === 0 || Number(statement.minimumDue || 0) === 0;
+}
+
+async function autoFillStatementFromFile(statement, file, card) {
+  let parsed = {};
+  try {
+    parsed = await extractStatementDetailsFromFile(file);
+  } catch {
+    parsed = {};
+  }
+  const detectedFieldCount = ["statementDate", "dueDate", "totalDue", "minimumDue"].filter((key) => parsed[key]).length;
+  statement.autoReadAttempted = true;
+  statement.autoReadDetectedFieldCount = detectedFieldCount;
+  if (parsed.statementDate && !statement.statementDate) statement.statementDate = parsed.statementDate.toISOString();
+  if (parsed.totalDue && Number(statement.totalDue || 0) === 0) statement.totalDue = parsed.totalDue;
+  if (parsed.minimumDue && Number(statement.minimumDue || 0) === 0) statement.minimumDue = parsed.minimumDue;
+  const expectedDueDate = statementDueDateForCard(statement.statementMonth, card);
+  if (parsed.dueDate && sameDay(statement.dueDate, expectedDueDate)) {
+    statement.dueDate = parsed.dueDate.toISOString();
+  }
+  return detectedFieldCount > 0;
+}
+
+async function extractStatementDetailsFromFile(file) {
+  const extension = fileExtension(file.name);
+  if (extension !== "pdf") return {};
+  const text = await extractTextFromPDF(file);
+  return parseStatementDetailsFromText(text);
+}
+
+async function extractTextFromPDF(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const raw = bytesToLatin1(bytes);
+  const chunks = [extractPDFVisibleText(raw)];
+  const streamMatches = [...raw.matchAll(/<<(?:.|\r|\n)*?>>\s*stream\r?\n?([\s\S]*?)\r?\n?endstream/g)];
+  for (const match of streamMatches) {
+    const objectHeader = match[0].slice(0, match[0].indexOf("stream"));
+    if (!/FlateDecode/i.test(objectHeader) || typeof DecompressionStream === "undefined") continue;
+    try {
+      const streamStart = raw.indexOf(match[1], match.index);
+      const streamBytes = bytes.slice(streamStart, streamStart + match[1].length);
+      const inflated = await inflateDeflateStream(streamBytes);
+      chunks.push(extractPDFVisibleText(bytesToLatin1(inflated)));
+    } catch {
+      // Some PDF streams are encrypted or use unsupported filters. The import still keeps the file.
+    }
+  }
+  return chunks.join("\n").replace(/\s+/g, " ").trim();
+}
+
+async function inflateDeflateStream(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function extractPDFVisibleText(raw) {
+  const literalStrings = [...raw.matchAll(/\((?:\\.|[^\\)])*\)/g)].map((match) => decodePDFLiteralString(match[0].slice(1, -1)));
+  const hexStrings = [...raw.matchAll(/<([0-9a-fA-F\s]{8,})>/g)].map((match) => decodePDFHexString(match[1]));
+  return [...literalStrings, ...hexStrings].filter((text) => /[A-Za-z0-9]/.test(text)).join(" ");
+}
+
+function decodePDFLiteralString(value) {
+  return String(value || "")
+    .replace(/\\([nrtbf()\\])/g, (_, code) => ({ n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", "(": "(", ")": ")", "\\": "\\" }[code] || code))
+    .replace(/\\(\d{1,3})/g, (_, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\u20B9]/g, " ");
+}
+
+function decodePDFHexString(value) {
+  const clean = String(value || "").replace(/\s/g, "");
+  const codes = [];
+  for (let index = 0; index + 1 < clean.length; index += 2) {
+    const byte = Number.parseInt(clean.slice(index, index + 2), 16);
+    if (Number.isFinite(byte) && byte > 0) codes.push(byte);
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(codes)).replace(/[^\x09\x0A\x0D\x20-\x7E\u20B9]/g, " ");
+}
+
+function parseStatementDetailsFromText(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return {};
+  const type = detectStatementDocumentType(normalized);
+  return {
+    statementDate: findDateNearLabels(normalized, type === "icici"
+      ? ["statement date", "statement generation date", "statement period"]
+      : ["statement date", "statement dt", "statement generated on", "statement generation date"]),
+    dueDate: findDateNearLabels(normalized, ["payment due date", "due date", "payment due dt", "payment due on"]),
+    totalDue: findAmountNearLabels(normalized, ["total amount due", "total amt due", "total due", "amount due", "total outstanding"]),
+    minimumDue: findAmountNearLabels(normalized, ["minimum amount due", "minimum amt due", "minimum due", "min amount due", "min due"])
+  };
+}
+
+function detectStatementDocumentType(text) {
+  const normalized = text.toLowerCase();
+  if (normalized.includes("icici") || normalized.includes("one view statement")) return "icici";
+  if (normalized.includes("hdfc") || normalized.includes("infinia")) return "hdfc";
+  return "generic";
+}
+
+function findDateNearLabels(text, labels) {
+  for (const label of labels) {
+    const regex = new RegExp(`${escapeRegExp(label)}\\s*[:\\-]?\\s*(${datePatternSource()})`, "i");
+    const match = text.match(regex);
+    const parsed = match ? parseStatementDateToken(match[1]) : null;
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function findAmountNearLabels(text, labels) {
+  for (const label of labels) {
+    const regex = new RegExp(`${escapeRegExp(label)}\\s*[:\\-]?\\s*(?:Rs\\.?|INR|₹)?\\s*([0-9][0-9,]*(?:\\.\\d{1,2})?)`, "i");
+    const match = text.match(regex);
+    const parsed = match ? parseStatementAmount(match[1]) : null;
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function datePatternSource() {
+  const months = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+  return `(?:\\d{1,2}[\\-/\\. ](?:\\d{1,2}|${months})[\\-/\\. ,]+\\d{2,4}|(?:${months})[\\-/\\. ]\\d{1,2}[\\-/\\. ,]+\\d{2,4})`;
+}
+
+function parseStatementDateToken(value) {
+  const token = String(value || "").trim().replace(/,/g, " ").replace(/\s+/g, " ");
+  const numeric = token.match(/^(\d{1,2})[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})$/);
+  if (numeric) return validStatementDate(Number(numeric[3]), Number(numeric[2]), Number(numeric[1]));
+  const dayMonthYear = token.match(/^(\d{1,2})[\/\-. ]([A-Za-z]+)[\/\-. ](\d{2,4})$/);
+  if (dayMonthYear) return validStatementDate(Number(dayMonthYear[3]), monthNameNumber(dayMonthYear[2]), Number(dayMonthYear[1]));
+  const monthDayYear = token.match(/^([A-Za-z]+)[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})$/);
+  if (monthDayYear) return validStatementDate(Number(monthDayYear[3]), monthNameNumber(monthDayYear[1]), Number(monthDayYear[2]));
+  return null;
+}
+
+function validStatementDate(yearValue, monthValue, dayValue) {
+  const year = yearValue < 100 ? 2000 + yearValue : yearValue;
+  const month = Number(monthValue);
+  const day = Number(dayValue);
+  if (year < 2020 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+
+function monthNameNumber(value) {
+  const key = String(value || "").slice(0, 3).toLowerCase();
+  return { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }[key] || 0;
+}
+
+function parseStatementAmount(value) {
+  const amount = Number(String(value || "").replace(/,/g, ""));
+  return Number.isFinite(amount) && amount >= 0 ? amount : null;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sameDay(a, b) {
+  const first = new Date(a);
+  const second = new Date(b);
+  if (Number.isNaN(first.getTime()) || Number.isNaN(second.getTime())) return false;
+  return first.getFullYear() === second.getFullYear()
+    && first.getMonth() === second.getMonth()
+    && first.getDate() === second.getDate();
+}
+
+function mergeDuplicateStatements(data) {
+  const groups = new Map();
+  for (const statement of data.statements) {
+    const month = monthStart(statement.statementMonth);
+    const key = `${statement.cardID || normalizeSyncName(statement.cardType)}-${month.getFullYear()}-${month.getMonth()}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(statement);
+  }
+
+  const keepers = [];
+  const remap = new Map();
+  for (const group of groups.values()) {
+    const keeper = [...group].sort((a, b) => statementMergeScore(b) - statementMergeScore(a))[0];
+    const merged = { ...keeper };
+    for (const duplicate of group) {
+      if (duplicate.id === keeper.id) continue;
+      if (!merged.statementDate && duplicate.statementDate) merged.statementDate = duplicate.statementDate;
+      if (Number(merged.totalDue || 0) === 0 && Number(duplicate.totalDue || 0) > 0) merged.totalDue = duplicate.totalDue;
+      if (Number(merged.minimumDue || 0) === 0 && Number(duplicate.minimumDue || 0) > 0) merged.minimumDue = duplicate.minimumDue;
+      if (Number(merged.autoReadDetectedFieldCount || 0) < Number(duplicate.autoReadDetectedFieldCount || 0)) {
+        merged.autoReadAttempted = duplicate.autoReadAttempted;
+        merged.autoReadDetectedFieldCount = duplicate.autoReadDetectedFieldCount;
+      }
+      if (!merged.cardID && duplicate.cardID) merged.cardID = duplicate.cardID;
+      if ((!merged.storedFileName || merged.fileName === "No file") && duplicate.storedFileName) {
+        merged.fileName = duplicate.fileName;
+        merged.storedFileName = duplicate.storedFileName;
+      }
+      if (new Date(duplicate.dueDate) > new Date(merged.dueDate)) merged.dueDate = duplicate.dueDate;
+      remap.set(duplicate.id, keeper.id);
+    }
+    keepers.push(merged);
+  }
+  data.statements = keepers;
+  data.payments = data.payments.map((payment) => remap.has(payment.statementID) ? { ...payment, statementID: remap.get(payment.statementID) } : payment);
+  const usedFiles = new Set(data.statements.map((statement) => statement.storedFileName).filter(Boolean));
+  data.statementFiles = data.statementFiles.filter((file) => usedFiles.has(file.id));
+}
+
+function statementMergeScore(statement) {
+  let score = 0;
+  if (statement.statementDate) score += 4;
+  if (Number(statement.totalDue || 0) > 0) score += 4;
+  if (Number(statement.minimumDue || 0) > 0) score += 3;
+  score += Number(statement.autoReadDetectedFieldCount || 0);
+  if (statement.storedFileName) score += 2;
+  if (statement.cardID) score += 1;
+  return score;
+}
+
+function statementSyncSummaryMessage(summary) {
+  return `Matched ${summary.matchedCards} card(s), scanned ${summary.scannedFiles} file(s), imported ${summary.importedStatements}, updated ${summary.updatedStatements}, auto-filled ${summary.autoFilledStatements}, skipped ${summary.skippedFiles}.`;
+}
+
+function normalizeSyncName(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function fileExtension(fileName) {
+  return String(fileName || "").split(".").pop()?.toLowerCase() || "";
 }
 
 async function deleteStatement(id) {
@@ -4035,6 +4438,15 @@ function base64ByteSize(base64) {
   if (!clean) return 0;
   const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+}
+
+function bytesToLatin1(bytes) {
+  let output = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    output += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+  }
+  return output;
 }
 
 function mimeTypeForFile(fileName) {
