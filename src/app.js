@@ -21,6 +21,8 @@ import {
   formatDate,
   fromMonthInput,
   INR,
+  isEMICompleted,
+  isEMICompletedByMonth,
   lastInstallmentDate,
   monthInputValue,
   monthStart,
@@ -36,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.10";
+const PUBLIC_VERSION = "v2.11";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -238,6 +240,7 @@ function render() {
       ${state.modal === "refundTransaction" ? refundSheetTemplate(state.modalPayload) : ""}
       ${state.modal === "convertEMI" ? convertEMISheetTemplate(state.modalPayload) : ""}
       ${state.modal === "editEMI" ? editEMISheetTemplate(state.modalPayload) : ""}
+      ${state.modal === "completeEMI" ? completeEMISheetTemplate(state.modalPayload) : ""}
       ${state.modal === "budgetEditor" ? budgetEditorSheetTemplate(state.modalPayload) : ""}
       ${state.modal === "budgetForecast" ? budgetForecastSheetTemplate() : ""}
       ${state.modal === "cardEditor" ? cardEditorSheetTemplate(state.modalPayload) : ""}
@@ -899,7 +902,8 @@ function destinationConfig(destination, existsOnly = false) {
 
 function emiPanelTemplate() {
   const data = state.data || emptyData();
-  const plans = [...data.emis].sort((a, b) => new Date(a.firstInstallmentDate) - new Date(b.firstInstallmentDate));
+  const plans = [...data.emis].sort((a, b) => emiPurchaseTime(b, data) - emiPurchaseTime(a, data));
+  const activePlans = plans.filter((plan) => !isEMICompleted(plan));
   const selectedMonth = fromMonthInput(state.selectedMonth);
   const totalDue = emiDueOnMonth(data.emis, selectedMonth, null);
   return `
@@ -909,7 +913,8 @@ function emiPanelTemplate() {
         <span>${INR.format(totalDue)}</span>
       </div>
       <div class="count-grid">
-        ${countPill("Active Plans", plans.length)}
+        ${countPill("Active Plans", activePlans.length)}
+        ${countPill("Completed", plans.length - activePlans.length)}
         ${countPill("This Month", INR.format(totalDue))}
       </div>
     </section>
@@ -922,23 +927,32 @@ function emiPanelTemplate() {
 function emiRowTemplate(plan, data) {
   const tx = data.transactions.find((item) => item.id === plan.transactionID);
   const selectedMonth = fromMonthInput(state.selectedMonth);
+  const completed = isEMICompleted(plan);
   return `
-    <article class="record-row swipe-row" data-swipe-leading="emi:edit:${escapeAttr(plan.id)}" data-swipe-trailing="emi:revert:${escapeAttr(plan.id)}">
+    <article class="record-row emi-row swipe-row ${completed ? "completed" : ""}" data-swipe-leading="emi:edit:${escapeAttr(plan.id)}" data-swipe-trailing="emi:revert:${escapeAttr(plan.id)}">
       <div class="record-main">
         <div class="record-title-line">
           <strong>${escapeHTML(tx?.title || "EMI Purchase")}</strong>
           <b>${INR.format(Number(plan.monthlyEMI || 0))}</b>
         </div>
-        <span>${escapeHTML(plan.cardType || "Card")} · ${Number(plan.tenureMonths || 0)} months</span>
+        <span>${escapeHTML(plan.cardType || "Card")} · ${Number(plan.tenureMonths || 0)} months · Purchased ${formatDate(tx?.date || plan.createdAt || plan.firstInstallmentDate)}</span>
         <span>First: ${formatDate(plan.firstInstallmentDate)} · Last: ${formatDate(lastInstallmentDate(plan))}</span>
-        <span>Remaining: ${remainingInstallments(plan, selectedMonth)} installment(s)</span>
+        <span>${completed ? `Completed: ${formatDate(plan.completedAt)}` : `Remaining: ${remainingInstallments(plan, selectedMonth)} installment(s)`}</span>
         <div class="row-actions">
           <button type="button" data-emi-action="edit" data-id="${escapeAttr(plan.id)}">Edit</button>
           <button type="button" class="danger-text" data-emi-action="revert" data-id="${escapeAttr(plan.id)}">Revert EMI</button>
+          <button type="button" class="${completed ? "success-text" : ""}" data-emi-action="complete" data-id="${escapeAttr(plan.id)}" ${completed ? "disabled" : ""}>${completed ? "Completed" : "Mark Complete"}</button>
         </div>
       </div>
     </article>
   `;
+}
+
+function emiPurchaseTime(plan, data) {
+  const tx = data.transactions.find((item) => item.id === plan.transactionID);
+  const value = tx?.date || plan.createdAt || plan.firstInstallmentDate;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
 }
 
 function budgetPanelTemplate() {
@@ -1762,6 +1776,35 @@ function editEMISheetTemplate(plan) {
   `;
 }
 
+function completeEMISheetTemplate(plan) {
+  if (!plan) return "";
+  const data = state.data || emptyData();
+  const tx = data.transactions.find((item) => item.id === plan.transactionID);
+  const today = dateInputValue(new Date());
+  return `
+    <div class="sheet-backdrop" data-action="close-modal">
+      <section class="bottom-sheet small-sheet" role="dialog" aria-modal="true" aria-labelledby="complete-emi-title" data-sheet>
+        <header class="sheet-toolbar">
+          <button type="button" class="toolbar-button" data-action="close-modal">Cancel</button>
+          <h2 id="complete-emi-title">Complete EMI</h2>
+          <button type="submit" form="complete-emi-form" class="toolbar-button confirm">Save</button>
+        </header>
+        <form id="complete-emi-form" class="form-list">
+          <div class="card plain-card">
+            <h2>${escapeHTML(tx?.title || "EMI Purchase")}</h2>
+            <p>${escapeHTML(plan.cardType || tx?.cardType || "Card")} · ${INR.format(Number(plan.monthlyEMI || 0))}</p>
+          </div>
+          <label class="form-row">
+            <span>Completion Date</span>
+            <input name="completedAt" type="date" required value="${escapeAttr(today)}">
+          </label>
+          <p class="form-hint">From this month onward, this EMI will be excluded from Payable calculations and future payable transaction lists.</p>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
 function budgetEditorSheetTemplate(budget) {
   const data = state.data || emptyData();
   const isEdit = Boolean(budget);
@@ -2560,6 +2603,19 @@ function bindEvents() {
     updateEMILastDatePreview();
   });
 
+  app.querySelector("#complete-emi-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await runBusy(async () => {
+      await completeEMIPlan(state.modalPayload?.id, form);
+      state.modal = null;
+      state.modalPayload = null;
+      state.importStatus = "EMI marked complete. Export a backup when you are done updating data.";
+      await refreshState();
+    });
+    render();
+  });
+
   app.querySelector("#budget-editor-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -2800,6 +2856,14 @@ async function handleEMIAction(action, id) {
 
   if (action === "edit") {
     state.modal = "editEMI";
+    state.modalPayload = plan;
+    render();
+    return;
+  }
+
+  if (action === "complete") {
+    if (isEMICompleted(plan)) return;
+    state.modal = "completeEMI";
     state.modalPayload = plan;
     render();
     return;
@@ -3075,6 +3139,18 @@ async function saveEMIEdit(id, form) {
     monthlyEMI,
     tenureMonths,
     firstInstallmentDate
+  }));
+}
+
+async function completeEMIPlan(id, form) {
+  if (!id) throw new Error("Missing EMI plan.");
+  const completedAtValue = form.get("completedAt");
+  if (!completedAtValue) throw new Error("Choose completion date.");
+  const completedAt = new Date(`${completedAtValue}T00:00:00`).toISOString();
+  await updateRecord("emis", id, (current) => ({
+    ...current,
+    completedAt,
+    updatedAt: new Date().toISOString()
   }));
 }
 
@@ -3824,6 +3900,7 @@ function monthTitle(date) {
 }
 
 function emiDueForPlanOnMonth(plan, selectedMonth) {
+  if (isEMICompletedByMonth(plan, selectedMonth)) return 0;
   const first = monthStart(plan.firstInstallmentDate);
   const target = monthStart(selectedMonth);
   const monthsElapsed = (target.getFullYear() - first.getFullYear()) * 12 + target.getMonth() - first.getMonth();

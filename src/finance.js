@@ -90,6 +90,7 @@ export function nextDueStatement(statements, payments, cardID = null) {
 export function emiDueOnMonth(emis, selectedMonth = new Date(), cardID = null) {
   const target = monthStart(selectedMonth);
   return filterByCard(emis, cardID).reduce((sum, plan) => {
+    if (isEMICompletedByMonth(plan, target)) return sum;
     const first = monthStart(plan.firstInstallmentDate);
     const monthsElapsed = (target.getFullYear() - first.getFullYear()) * 12 + target.getMonth() - first.getMonth();
     if (monthsElapsed >= 0 && monthsElapsed < Number(plan.tenureMonths || 0)) {
@@ -101,6 +102,7 @@ export function emiDueOnMonth(emis, selectedMonth = new Date(), cardID = null) {
 
 export function installmentIndexForMonth(plan, selectedMonth = new Date()) {
   const target = monthStart(selectedMonth);
+  if (isEMICompletedByMonth(plan, target)) return null;
   const first = monthStart(plan.firstInstallmentDate);
   const monthsElapsed = (target.getFullYear() - first.getFullYear()) * 12 + target.getMonth() - first.getMonth();
   if (monthsElapsed < 0 || monthsElapsed >= Number(plan.tenureMonths || 0)) return null;
@@ -108,9 +110,19 @@ export function installmentIndexForMonth(plan, selectedMonth = new Date()) {
 }
 
 export function remainingInstallments(plan, selectedMonth = new Date()) {
+  if (isEMICompletedByMonth(plan, selectedMonth)) return 0;
   const index = installmentIndexForMonth(plan, selectedMonth);
   if (index === null) return Number(plan.tenureMonths || 0);
   return Math.max(0, Number(plan.tenureMonths || 0) - index);
+}
+
+export function isEMICompleted(plan) {
+  return Boolean(plan?.completedAt);
+}
+
+export function isEMICompletedByMonth(plan, selectedMonth = new Date()) {
+  if (!isEMICompleted(plan)) return false;
+  return monthStart(selectedMonth) >= monthStart(plan.completedAt);
 }
 
 export function lastInstallmentDate(plan) {

@@ -1381,6 +1381,11 @@ button:disabled {
   background: rgba(255, 255, 255, 0.22);
 }
 
+.emi-row.completed {
+  border-left: 4px solid var(--green);
+  background: var(--green-soft);
+}
+
 .settings-list {
   display: grid;
   gap: 8px;
@@ -1515,6 +1520,15 @@ button:disabled {
 .row-actions .danger-text {
   color: var(--red);
   background: var(--red-soft);
+}
+
+.row-actions .success-text {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.row-actions button:disabled {
+  opacity: 1;
 }
 
 .statement-row {
