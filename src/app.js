@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.15";
+const PUBLIC_VERSION = "v2.16";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -603,7 +603,6 @@ function importPromptTemplate() {
 function moreTemplate() {
   const items = [
     ["budget", "Budget", "wallet"],
-    ["transactions", "Transactions", "list"],
     ["statements", "Statements", "doc"],
     ["emis", "EMIs", "card"],
     ["backup", "Backup & Restore", "cloud"],
