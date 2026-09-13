@@ -38,7 +38,7 @@ import {
   statementStatus
 } from "./finance.js";
 
-const PUBLIC_VERSION = "v2.17";
+const PUBLIC_VERSION = "v2.18";
 const APP_VERSION = `Kuber PWA ${PUBLIC_VERSION}`;
 const DESTINATION_IDS = new Set(["budget", "transactions", "statements", "emis", "backup", "spending", "wishlist", "settings"]);
 
@@ -1550,17 +1550,17 @@ function statementsPanelTemplate() {
   const data = state.data || emptyData();
   const rows = filteredStatements(data);
   return `
-    <section class="card statement-toolbar-card">
-      <div class="section-title">
-        <h2>Statements</h2>
-        <div class="statement-toolbar-actions">
-          <button class="inline-button" type="button" data-statement-action="sync-folder">Sync Folder</button>
-          <button class="inline-button" type="button" data-statement-action="sync-files">Choose PDFs</button>
-          <button class="inline-button" type="button" data-statement-action="add">Upload</button>
-        </div>
+    <section class="card statement-sync-card">
+      <div class="statement-sync-copy">
+        <strong>Folder Sync</strong>
+        <span>New Statement / Card / Year / MM-YYYY.pdf</span>
       </div>
-      <input hidden type="file" data-control="statement-folder-input" webkitdirectory multiple accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg">
-      <input hidden type="file" data-control="statement-files-input" multiple accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg">
+      <div class="statement-sync-actions">
+        <button class="inline-button" type="button" data-statement-action="sync-folder">Sync Folder</button>
+        <button class="inline-button secondary-inline" type="button" data-statement-action="add">Upload</button>
+      </div>
+      ${state.importStatus ? `<p class="status-line statement-status-line">${escapeHTML(state.importStatus)}</p>` : ""}
+      <input hidden type="file" data-control="statement-folder-input" webkitdirectory directory multiple accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg">
     </section>
     ${data.cards.length ? `
       <div class="chip-row panel-chips" aria-label="Statement card filter">
@@ -2350,21 +2350,13 @@ function bindEvents() {
   app.querySelector("[data-control='statement-folder-input']")?.addEventListener("change", async (event) => {
     const files = [...(event.target.files || [])];
     event.target.value = "";
-    if (!files.length) return;
+    if (!files.length) {
+      state.importStatus = statementSyncSummaryMessage({ totalFiles: 0, matchedCards: 0, scannedFiles: 0, importedStatements: 0, updatedStatements: 0, autoFilledStatements: 0, skippedFiles: 0 });
+      render();
+      return;
+    }
     await runBusy(async () => {
       const summary = await syncStatementsFromFiles(files, { requireFolderPath: true });
-      state.importStatus = statementSyncSummaryMessage(summary);
-      await refreshState();
-    });
-    render();
-  });
-
-  app.querySelector("[data-control='statement-files-input']")?.addEventListener("change", async (event) => {
-    const files = [...(event.target.files || [])];
-    event.target.value = "";
-    if (!files.length) return;
-    await runBusy(async () => {
-      const summary = await syncStatementsFromFiles(files, { requireFolderPath: false });
       state.importStatus = statementSyncSummaryMessage(summary);
       await refreshState();
     });
@@ -3082,11 +3074,26 @@ async function handleStatementAction(action, id) {
     return;
   }
   if (action === "sync-folder") {
+    if (typeof window.showDirectoryPicker === "function") {
+      try {
+        const directory = await window.showDirectoryPicker();
+        await runBusy(async () => {
+          const files = [];
+          await collectStatementDirectoryFiles(directory, directory.name, files);
+          const summary = await syncStatementsFromFiles(files, { requireFolderPath: true });
+          state.importStatus = statementSyncSummaryMessage(summary);
+          await refreshState();
+        });
+        render();
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          state.importStatus = "Statement sync could not read that folder. Try Upload for a single statement.";
+          render();
+        }
+      }
+      return;
+    }
     app.querySelector("[data-control='statement-folder-input']")?.click();
-    return;
-  }
-  if (action === "sync-files") {
-    app.querySelector("[data-control='statement-files-input']")?.click();
     return;
   }
   const statement = data.statements.find((item) => item.id === id);
@@ -3403,6 +3410,7 @@ async function saveStatement(id, form) {
 async function syncStatementsFromFiles(files, options = {}) {
   const data = await getAllData();
   const summary = {
+    totalFiles: files.length,
     matchedCards: 0,
     scannedFiles: 0,
     importedStatements: 0,
@@ -3482,6 +3490,30 @@ async function syncStatementsFromFiles(files, options = {}) {
   return summary;
 }
 
+async function collectStatementDirectoryFiles(directoryHandle, path, files) {
+  for await (const [name, handle] of directoryHandle.entries()) {
+    const nextPath = `${path}/${name}`;
+    if (handle.kind === "directory") {
+      await collectStatementDirectoryFiles(handle, nextPath, files);
+      continue;
+    }
+    if (handle.kind !== "file") continue;
+    const file = await handle.getFile();
+    files.push(fileWithRelativePath(file, nextPath));
+  }
+}
+
+function fileWithRelativePath(file, path) {
+  try {
+    Object.defineProperty(file, "webkitRelativePath", { value: path, configurable: true });
+    return file;
+  } catch {
+    const copy = new File([file], file.name, { type: file.type, lastModified: file.lastModified });
+    Object.defineProperty(copy, "webkitRelativePath", { value: path, configurable: true });
+    return copy;
+  }
+}
+
 function statementSyncTargetForFile(file, cards, options = {}) {
   const rawPath = file.webkitRelativePath || file.name || "";
   const parts = rawPath.split(/[\\/]/).map((part) => part.trim()).filter(Boolean);
@@ -3496,17 +3528,27 @@ function statementSyncTargetForFile(file, cards, options = {}) {
   if (options.requireFolderPath && (!yearSegment || Number(yearSegment) !== fileYear)) return null;
 
   const card = cards.find((candidate) => {
-    const names = [candidate.nickname, displayCard(candidate), candidate.last4Digits, candidate.bankName]
-      .map((value) => normalizeSyncName(value))
-      .filter(Boolean);
+    const names = statementCardSyncNames(candidate);
     const searchParts = options.requireFolderPath ? parts.slice(0, -1) : parts;
     return searchParts.some((part) => {
       const normalized = normalizeSyncName(part);
-      return names.some((name) => normalized === name || normalized.includes(name));
+      return names.some((name) => normalized === name || normalized.includes(name) || name.includes(normalized));
     });
   });
   if (!card) return null;
   return { card, statementMonth };
+}
+
+function statementCardSyncNames(card) {
+  const names = new Set();
+  [card.nickname, displayCard(card), card.last4Digits, card.bankName].forEach((value) => {
+    const normalized = normalizeSyncName(value);
+    if (!normalized) return;
+    names.add(normalized);
+    const withoutTrailingDigits = normalized.replace(/\d{4}$/, "");
+    if (withoutTrailingDigits.length >= 4) names.add(withoutTrailingDigits);
+  });
+  return [...names];
 }
 
 function parsedStatementMonthFromName(fileBaseName) {
@@ -3754,7 +3796,14 @@ function statementMergeScore(statement) {
 }
 
 function statementSyncSummaryMessage(summary) {
-  return `Matched ${summary.matchedCards} card(s), scanned ${summary.scannedFiles} file(s), imported ${summary.importedStatements}, updated ${summary.updatedStatements}, auto-filled ${summary.autoFilledStatements}, skipped ${summary.skippedFiles}.`;
+  const totalFiles = Number(summary.totalFiles || 0);
+  if (!totalFiles) {
+    return "Statement sync: Safari did not expose files from that folder. If your PDFs are inside card/year subfolders, try iOS 18.4+ or use Upload for individual statements.";
+  }
+  if (!summary.scannedFiles) {
+    return `Statement sync: found ${totalFiles} file(s), but none matched Card/Year/MM-YYYY.pdf. Expected New Statement/AmazonPay/2026/08-2026.pdf.`;
+  }
+  return `Statement sync: matched ${summary.matchedCards} card(s), scanned ${summary.scannedFiles} file(s), imported ${summary.importedStatements}, updated ${summary.updatedStatements}, auto-filled ${summary.autoFilledStatements}, skipped ${summary.skippedFiles}.`;
 }
 
 function normalizeSyncName(value) {

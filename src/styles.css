@@ -1419,22 +1419,55 @@ button:disabled {
   gap: 10px;
 }
 
-.statement-toolbar-card {
+.statement-sync-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 10px;
+  padding: 14px;
 }
 
-.statement-toolbar-actions {
+.statement-sync-copy {
   min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.statement-sync-copy strong {
+  font-size: 17px;
+}
+
+.statement-sync-copy span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statement-sync-actions {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 6px;
 }
 
-.statement-toolbar-actions .inline-button {
-  min-height: 30px;
-  padding: 4px 10px;
+.statement-sync-actions .inline-button {
+  min-height: 34px;
+  padding: 5px 11px;
   font-size: 12px;
+}
+
+.secondary-inline {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.statement-status-line {
+  grid-column: 1 / -1;
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .embedded-form {
